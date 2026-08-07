@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "wikimap",
+  "version": "1.0.0",
+  "repository": "https://github.com/dhha22/wikimap",
+  "commit": "9c26d7b66322741532ede0b474f0e5106643f275",
+  "license": "MIT",
+  "vendored_at": "2026-07-15",
+  "files": {
+    "wikimap.py": "1e81848539ad959d90c15441b08cc95073619331afe4562f3960808f755970e9",
+    "LICENSE": "e950a4da5722fea564dff1266790dd4d1415a6e70ee37baeb6147d0e9dc93e91"
+  }
+}

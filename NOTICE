@@ -1,0 +1,5 @@
+local-wiki-librarian
+
+This project vendors Wikimap under src/local_wiki_librarian/_vendor/wikimap/.
+Wikimap is Copyright (c) 2026 Donghyun Ha and is distributed under its MIT
+license. See the bundled LICENSE and UPSTREAM.json for exact provenance.

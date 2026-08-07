@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-wiki-librarian.dev/schemas/librarian-packet.schema.json",
+  "title": "LibrarianPacket",
+  "type": "object",
+  "required": ["schema_version", "query", "status", "route", "retrieval", "authority", "candidates", "trail", "answer", "stop_reason", "recommended_action", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "query": {
+      "type": "object",
+      "required": ["query", "intent", "time_scope", "external_verification_allowed", "max_graph_hops"]
+    },
+    "status": {"enum": ["ok", "degraded", "stopped", "error"]},
+    "route": {"type": "object"},
+    "retrieval": {"type": "object"},
+    "authority": {"type": "object"},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "canonical_path", "authority_class", "verdict", "reason", "engines"],
+        "properties": {
+          "verdict": {"enum": ["selected", "supporting", "evidence_only", "rejected"]},
+          "engines": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        }
+      }
+    },
+    "trail": {"type": "array"},
+    "answer": {"type": "object"},
+    "stop_reason": {
+      "type": ["string", "null"],
+      "enum": [null, "INDEX_DEGRADED", "NO_CANON_FOUND", "AUTHORITY_AMBIGUOUS", "CONFLICT_OPEN", "FRESH_SOURCE_REQUIRED", "INSUFFICIENT_EVIDENCE", "WRITE_APPROVAL_REQUIRED"]
+    },
+    "recommended_action": {"type": ["string", "null"]},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

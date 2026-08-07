@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-wiki-librarian"
+version = "0.1.0"
+description = "Fail-closed, authority-aware retrieval for local Markdown knowledge bases"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "JeremyDev87" }]
+requires-python = ">=3.9"
+keywords = ["markdown", "wiki", "retrieval", "local-first"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = ["pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/JeremyDev87/librarian"
+Repository = "https://github.com/JeremyDev87/librarian"
+Issues = "https://github.com/JeremyDev87/librarian/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9", "ruff==0.8.6"]
+
+[project.scripts]
+wiki-librarian = "local_wiki_librarian.cli:main"
+wiki-librarian-refresh = "local_wiki_librarian.refresh:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+local_wiki_librarian = ["_vendor/wikimap/*", "schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/wiki_retrieval"]
+pythonpath = ["src"]
+
+[tool.ruff]
+exclude = ["src/local_wiki_librarian/_vendor"]
