@@ -10,7 +10,6 @@ on:
       tag:
         description: Release tag represented by the candidate metadata
         required: true
-        default: v0.1.0
         type: string
 
 permissions:
@@ -36,7 +35,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$RELEASE_TAG" = "v0.1.0"
           rm -rf dist release-evidence release-manifest.json
           mkdir -p release-evidence
           python -m pip install --upgrade pip build twine

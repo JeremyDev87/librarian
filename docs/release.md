@@ -5,7 +5,7 @@
 ## 1. Candidate freeze
 
 1. 공개 `main`의 exact commit SHA를 readback합니다. 기본 브랜치가 이동하면 기존 candidate를 폐기하고 새 SHA로 다시 시작합니다.
-2. GitHub Actions의 **Release candidate**를 수동 실행하고 `source_sha`와 `v0.1.0`을 입력합니다.
+2. GitHub Actions의 **Release candidate**를 수동 실행하고 `source_sha`와 현재 프로젝트 version에 대응하는 tag(현재 release는 `v0.1.0`)를 입력합니다.
 3. workflow가 trusted `main`을 checkout한 뒤 SHA를 비교하고, 한 번의 `python -m build` 결과만 검증하는지 확인합니다.
 4. `twine check`, wheel/sdist 격리 verifier(각 2회), `release-manifest.json`의 source/tree/artifact digest/provenance를 확인합니다.
 5. candidate artifact는 검토용입니다. 이 workflow에는 `id-token: write`, `contents: write`, release 생성, publish 권한이 없습니다.
@@ -34,7 +34,7 @@ Release는 published/non-prerelease 상태여야 합니다. tag는 exact source 
 
 ## 3. PyPI Trusted Publishing Owner Gate
 
-1. PyPI project `local-wiki-librarian`과 GitHub Environment `pypi`의 Trusted Publisher 설정을 별도로 확인합니다.
+1. **Owner Gate:** PyPI project `local-wiki-librarian`과 GitHub Environment `pypi`의 Trusted Publisher 설정을 별도로 확인합니다. Environment에는 required reviewers를 지정하고, 배포 branch restriction은 `main`으로 제한하며, 실제 settings 화면/API readback 증거를 보관합니다.
 2. publish workflow를 `tag`와 `source_sha`로 수동 실행합니다.
 3. admission job은 trusted default-branch helper로 tag 형식·tag→commit·published Release·manifest·wheel/sdist digest를 검증합니다.
 4. publish job은 다시 Release asset을 내려받아 동일 admission과 `twine check`를 통과한 뒤에만 `pypa/gh-action-pypi-publish`를 호출합니다.
