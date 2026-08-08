@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import zipfile
 
+import pytest
 import yaml
 
 
@@ -26,6 +27,64 @@ def _load_manifest_module():
 
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+
+def _load_admission_module():
+    path = REPO_ROOT / "scripts" / "verify-release-admission.py"
+    spec = importlib.util.spec_from_file_location("verify_release_admission", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("cannot load release admission verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_release_admission_rechecks_distribution_names_and_local_digests(tmp_path: Path, monkeypatch) -> None:
+    module = _load_admission_module()
+    wheel_payload = b"wheel"
+    sdist_payload = b"sdist"
+    manifest = {
+        "schema_version": 1,
+        "distribution": {"name": "local-wiki-librarian", "version": "0.1.0"},
+        "source": {"commit": "a" * 40, "tag": "v0.1.0"},
+        "artifacts": [
+            {
+                "name": "local_wiki_librarian-0.1.0-py3-none-any.whl",
+                "sha256": hashlib.sha256(wheel_payload).hexdigest(),
+            },
+            {
+                "name": "local-wiki-librarian-0.1.0.tar.gz",
+                "sha256": hashlib.sha256(sdist_payload).hexdigest(),
+            },
+        ],
+    }
+    assets = [
+        {"name": "release-manifest.json", "url": "manifest"},
+        {"name": manifest["artifacts"][0]["name"], "url": "wheel"},
+        {"name": manifest["artifacts"][1]["name"], "url": "sdist"},
+    ]
+    payloads = {
+        "manifest": json.dumps(manifest).encode("utf-8"),
+        "wheel": wheel_payload,
+        "sdist": sdist_payload,
+    }
+    monkeypatch.setattr(module, "resolve_tag", lambda *_args: "a" * 40)
+    monkeypatch.setattr(module, "api_request", lambda *_args: {"draft": False, "prerelease": False, "assets": assets, "id": 7})
+    monkeypatch.setattr(module, "download_asset", lambda url, _token: payloads[url])
+
+    local_dir = tmp_path / "assets"
+    local_dir.mkdir()
+    (local_dir / "release-manifest.json").write_bytes(payloads["manifest"])
+    (local_dir / assets[1]["name"]).write_bytes(wheel_payload)
+    (local_dir / assets[2]["name"]).write_bytes(sdist_payload)
+    receipt = module.admit("JeremyDev87/librarian", "v0.1.0", "a" * 40, "token", local_dir)
+    assert receipt["status"] == "ok"
+    assert receipt["local_assets_checked"] is True
+
+    manifest["distribution"]["name"] = "unexpected-name"
+    payloads["manifest"] = json.dumps(manifest).encode("utf-8")
+    with pytest.raises(RuntimeError, match="distribution"):
+        module.admit("JeremyDev87/librarian", "v0.1.0", "a" * 40, "token")
 
 
 def test_release_manifest_captures_source_artifacts_provenance_and_verifiers(tmp_path: Path) -> None:
@@ -124,6 +183,8 @@ def test_candidate_workflow_is_read_only_and_freezes_one_build() -> None:
     assert workflow["permissions"]["contents"] == "read"
     assert "id-token" not in text
     assert text.count("python -m build") == 1
+    assert "default: v0.1.0" not in text
+    assert 'test "$RELEASE_TAG" = "v0.1.0"' not in text
     assert "twine check dist/*" in text
     assert "build-release-manifest.py" in text
     assert "actions/upload-artifact@" in text
@@ -140,6 +201,8 @@ def test_publish_workflow_has_separate_oidc_gate_and_admission_order() -> None:
     assert "environment: pypi" in text
     assert "id-token: write" in text
     assert "contents: write" not in text
+    assert "Owner Gate: configure GitHub environment pypi" in text
+    assert "required reviewers" in text
     assert "${{" not in "\n".join(line for line in text.splitlines() if "run:" in line)
     assert text.index("verify-release-admission.py") < text.index("pypa/gh-action-pypi-publish@")
     assert all("@" in line and len(line.split("@", 1)[1].split()[0]) == 40 for line in text.splitlines() if "uses:" in line)

@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 API_VERSION = "2022-11-28"
+DISTRIBUTION_NAME = "local-wiki-librarian"
 
 
 def api_request(url: str, token: str, accept: str = "application/vnd.github+json") -> Any:
@@ -106,6 +107,24 @@ def check_local_assets(local_dir: Path, manifest: Dict[str, Any]) -> None:
             raise RuntimeError(f"local release asset digest mismatch: {name}")
 
 
+def validate_distribution_names(manifest: Dict[str, Any], asset_names: Iterable[str]) -> None:
+    distribution = manifest.get("distribution")
+    if not isinstance(distribution, dict):
+        raise RuntimeError("release manifest has no distribution object")
+    if distribution.get("name") != DISTRIBUTION_NAME:
+        raise RuntimeError("release manifest distribution name is not local-wiki-librarian")
+    version = distribution.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise RuntimeError("release manifest distribution version is invalid")
+    wheel_prefix = f"{DISTRIBUTION_NAME.replace('-', '_')}-{version}-"
+    sdist_name = f"{DISTRIBUTION_NAME}-{version}.tar.gz"
+    names = list(asset_names)
+    if not any(name.startswith(wheel_prefix) and name.endswith(".whl") for name in names):
+        raise RuntimeError("release wheel name does not match distribution/version")
+    if sdist_name not in names:
+        raise RuntimeError("release sdist name does not match distribution/version")
+
+
 def admit(repo: str, tag: str, expected_sha: str, token: str, local_dir: Optional[Path] = None) -> Dict[str, Any]:
     if not TAG_RE.fullmatch(tag):
         raise RuntimeError("tag must match vMAJOR.MINOR.PATCH")
@@ -135,6 +154,7 @@ def admit(repo: str, tag: str, expected_sha: str, token: str, local_dir: Optiona
     source = manifest.get("source", {})
     if source.get("commit") != expected_sha or source.get("tag") != tag:
         raise RuntimeError("release manifest source does not match the admitted tag")
+    validate_distribution_names(manifest, [wheel_names[0], sdist_names[0]])
     artifact_rows = {row.get("name"): row for row in manifest.get("artifacts", []) if isinstance(row, dict)}
     if set(artifact_rows) != {wheel_names[0], sdist_names[0]}:
         raise RuntimeError("release manifest artifact names do not match the release assets")
