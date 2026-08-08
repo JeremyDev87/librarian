@@ -1,0 +1,65 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA; must be the current public main commit
+        required: true
+        type: string
+      tag:
+        description: Release tag represented by the candidate metadata
+        required: true
+        default: v0.1.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Build and verify one frozen candidate
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$RELEASE_TAG" = "v0.1.0"
+          rm -rf dist release-evidence release-manifest.json
+          mkdir -p release-evidence
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+          for artifact in dist/*; do
+            name="$(basename "$artifact")"
+            python scripts/verify-installed-package.py "$artifact" --runs 2 > "release-evidence/${name}.json"
+          done
+          python scripts/build-release-manifest.py \
+            --source-root . \
+            --source-sha "$SOURCE_SHA" \
+            --tag "$RELEASE_TAG" \
+            --artifacts dist/* \
+            --verifier-result release-evidence/*.json \
+            --output release-manifest.json
+          python -m json.tool release-manifest.json >/dev/null
+      - name: Upload frozen candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-wiki-librarian-release-candidate
+          if-no-files-found: error
+          path: |
+            dist/*
+            release-evidence/*.json
+            release-manifest.json

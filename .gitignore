@@ -15,3 +15,5 @@ dist/
 state/
 .snapshots/
 *.db
+release-evidence/
+release-manifest.json
