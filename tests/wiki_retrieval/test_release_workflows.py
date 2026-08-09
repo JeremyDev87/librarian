@@ -86,6 +86,16 @@ def test_release_admission_rechecks_distribution_names_and_local_digests(tmp_pat
     with pytest.raises(RuntimeError, match="distribution"):
         module.admit("JeremyDev87/librarian", "v0.1.0", "a" * 40, "token")
 
+    mismatched_manifest = {
+        "distribution": {"name": "local-wiki-librarian", "version": "9.9.9"},
+    }
+    with pytest.raises(RuntimeError, match="version does not match tag"):
+        module.validate_distribution_names(
+            mismatched_manifest,
+            ["local_wiki_librarian-9.9.9-py3-none-any.whl", "local-wiki-librarian-9.9.9.tar.gz"],
+            "v0.1.0",
+        )
+
 
 def test_release_manifest_captures_source_artifacts_provenance_and_verifiers(tmp_path: Path) -> None:
     module = _load_manifest_module()

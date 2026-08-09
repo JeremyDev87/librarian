@@ -107,7 +107,7 @@ def check_local_assets(local_dir: Path, manifest: Dict[str, Any]) -> None:
             raise RuntimeError(f"local release asset digest mismatch: {name}")
 
 
-def validate_distribution_names(manifest: Dict[str, Any], asset_names: Iterable[str]) -> None:
+def validate_distribution_names(manifest: Dict[str, Any], asset_names: Iterable[str], tag: str) -> None:
     distribution = manifest.get("distribution")
     if not isinstance(distribution, dict):
         raise RuntimeError("release manifest has no distribution object")
@@ -116,6 +116,8 @@ def validate_distribution_names(manifest: Dict[str, Any], asset_names: Iterable[
     version = distribution.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise RuntimeError("release manifest distribution version is invalid")
+    if version != tag.removeprefix("v"):
+        raise RuntimeError("release manifest distribution version does not match tag")
     wheel_prefix = f"{DISTRIBUTION_NAME.replace('-', '_')}-{version}-"
     sdist_name = f"{DISTRIBUTION_NAME}-{version}.tar.gz"
     names = list(asset_names)
@@ -154,7 +156,7 @@ def admit(repo: str, tag: str, expected_sha: str, token: str, local_dir: Optiona
     source = manifest.get("source", {})
     if source.get("commit") != expected_sha or source.get("tag") != tag:
         raise RuntimeError("release manifest source does not match the admitted tag")
-    validate_distribution_names(manifest, [wheel_names[0], sdist_names[0]])
+    validate_distribution_names(manifest, [wheel_names[0], sdist_names[0]], tag)
     artifact_rows = {row.get("name"): row for row in manifest.get("artifacts", []) if isinstance(row, dict)}
     if set(artifact_rows) != {wheel_names[0], sdist_names[0]}:
         raise RuntimeError("release manifest artifact names do not match the release assets")
