@@ -67,12 +67,17 @@ def run_librarian(
     state_root: Path,
     k: int = 10,
     graph_hops: int = 1,
+    include_zero_score_graph: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     snapshot_dir, authority, wikimap_path = load_runtime(state_root)
     adapter = WikimapAdapter(wikimap_path, snapshot_dir)
     if not (snapshot_dir / ".wikimap" / "index.db").is_file():
         adapter.index()
-    router = WikiRouter(adapter, authority, RouterConfig(k=k, graph_depth=graph_hops))
+    router = WikiRouter(adapter, authority, RouterConfig(
+        k=k,
+        graph_depth=graph_hops,
+        include_zero_score_graph=include_zero_score_graph,
+    ))
     results = router.search(query)
     entry_map = {entry.relative_path: entry for entry in authority.entries}
     payload = []
@@ -98,10 +103,18 @@ def run_librarian(
     return payload, list(router.last_warnings)
 
 
-def _search(query: str, state_root: Path, k: int, graph_hops: int = 1) -> dict[str, Any]:
+def _search(
+    query: str,
+    state_root: Path,
+    k: int,
+    graph_hops: int = 1,
+    include_zero_score_graph: bool = False,
+) -> dict[str, Any]:
     mode = get_retriever_mode().value
     try:
-        results, warnings = run_librarian(query, state_root, k, graph_hops)
+        results, warnings = run_librarian(
+            query, state_root, k, graph_hops, include_zero_score_graph,
+        )
     except (FileNotFoundError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, RuntimeError) as exc:
         return {"schema_version": 1, "status": "error", "mode": mode, "degraded": False,
                 "warnings": [f"librarian unavailable: {type(exc).__name__}"], "results": []}
@@ -166,7 +179,13 @@ def _health(state_root: Path) -> dict[str, Any]:
 
 
 def _packet(command: str, args: argparse.Namespace) -> dict[str, Any]:
-    search = _search(args.query, args.state_root, args.num, args.graph_hops)
+    search = _search(
+        args.query,
+        args.state_root,
+        args.num,
+        args.graph_hops,
+        args.include_zero_score_graph,
+    )
     if search["status"] == "error":
         return {
             "schema_version": 1,
@@ -245,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time-scope", choices=["historical", "saved_knowledge", "current"], default="saved_knowledge")
     parser.add_argument("--domain")
     parser.add_argument("--graph-hops", type=int, default=1)
+    parser.add_argument("--include-zero-score-graph", action="store_true")
     parser.add_argument("--pretty", action="store_true")
     return parser
 
@@ -257,7 +277,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "health":
         data = _health(args.state_root)
     elif args.command == "search":
-        data = _search(args.query, args.state_root, args.num, args.graph_hops)
+        data = _search(
+            args.query,
+            args.state_root,
+            args.num,
+            args.graph_hops,
+            args.include_zero_score_graph,
+        )
     elif args.command in {"ask", "locate", "trace"}:
         try:
             data = _packet(args.command, args)

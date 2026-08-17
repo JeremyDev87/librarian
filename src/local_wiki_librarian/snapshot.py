@@ -87,6 +87,35 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _write_bytes_fsync(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_generation(generation_dir: Path, snapshots_dir: Path) -> None:
+    """Make every candidate byte and directory entry durable before exposure."""
+    for path in sorted(generation_dir.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+    directories = [path for path in generation_dir.rglob("*") if path.is_dir()]
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        _fsync_directory(directory)
+    _fsync_directory(generation_dir)
+    _fsync_directory(snapshots_dir)
+
+
 def _is_symlink(path: Path) -> bool:
     """Check symlink without following."""
     try:
@@ -164,6 +193,37 @@ def _previous_file_map(manifest: dict | None) -> dict[str, dict]:
     return result
 
 
+def _canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return _sha256_bytes(payload)
+
+
+def _inventory_rows(entries: list[dict] | list[FileState]) -> list[tuple[str, int, str]]:
+    rows: list[tuple[str, int, str]] = []
+    for entry in entries:
+        if isinstance(entry, FileState):
+            relative, size, sha, state = (
+                entry.relative_path, entry.size, entry.sha256, entry.state,
+            )
+        else:
+            relative = entry.get("relative_path")
+            size = entry.get("size")
+            sha = entry.get("sha256")
+            state = entry.get("state")
+        if state not in {"copied", "stale"}:
+            continue
+        if not isinstance(relative, str) or not isinstance(size, int) or not isinstance(sha, str):
+            raise SnapshotError("snapshot inventory entry is malformed")
+        rows.append((relative, size, sha))
+    return sorted(rows)
+
+
+def _inventory_sha256(entries: list[dict] | list[FileState]) -> str:
+    return _canonical_json_sha256(_inventory_rows(entries))
+
+
 def _previous_file_bytes(state_root: Path, generation: str, relative_path: str) -> bytes | None:
     """Read bytes of a file from a previous generation's snapshot."""
     prev_path = state_root / "snapshots" / generation / relative_path
@@ -186,6 +246,9 @@ def build_snapshot(
     max_retries: int = _MAX_RETRIES,
     retry_delay: float = _RETRY_DELAY_SECONDS,
     prepare_generation: Callable[[Path, dict], dict] | None = None,
+    *,
+    promote: bool = True,
+    migration_receipt: dict | None = None,
 ) -> SnapshotResult:
     """Build an atomic read-only snapshot of all Markdown files.
 
@@ -240,10 +303,56 @@ def build_snapshot(
         # Discover files
         entries = discover_markdown(canonical_root)
 
-        # Load previous manifest for stale/deleted detection
+        # Load previous manifest for stale/deleted detection. A root migration
+        # is a new baseline: previous bytes must never silently cross roots.
         prev_manifest = _load_previous_manifest(state_root)
         prev_files = _previous_file_map(prev_manifest)
         prev_generation = prev_manifest.get("generation") if prev_manifest else None
+        migration_receipt_sha256: str | None = None
+        if prev_manifest is not None:
+            previous_root = Path(str(prev_manifest.get("canonical_root", ""))).resolve()
+            root_changed = previous_root != canonical_root
+            if root_changed:
+                if not isinstance(migration_receipt, dict):
+                    raise SnapshotError("root migration receipt is required before staging")
+                expected_receipt_keys = {
+                    "schema_version",
+                    "expected_current_generation",
+                    "expected_current_sha256",
+                    "from_root",
+                    "to_root",
+                    "old_inventory_sha256",
+                    "new_inventory_sha256",
+                    "old_only_paths",
+                    "old_only_paths_sha256",
+                }
+                if set(migration_receipt) != expected_receipt_keys:
+                    raise SnapshotError("root migration receipt schema mismatch")
+                current_payload = (state_root / _CURRENT_FILENAME).read_bytes()
+                expected = {
+                    "schema_version": 1,
+                    "expected_current_generation": prev_generation,
+                    "expected_current_sha256": _sha256_bytes(current_payload),
+                    "from_root": str(previous_root),
+                    "to_root": str(canonical_root),
+                    "old_inventory_sha256": _inventory_sha256(list(prev_files.values())),
+                }
+                for key, value in expected.items():
+                    if migration_receipt.get(key) != value:
+                        raise SnapshotError(f"root migration receipt {key} mismatch")
+                old_only = migration_receipt.get("old_only_paths")
+                if not isinstance(old_only, list) or not all(isinstance(path, str) for path in old_only):
+                    raise SnapshotError("root migration receipt old_only_paths is malformed")
+                if old_only != sorted(set(old_only)):
+                    raise SnapshotError("root migration receipt old_only_paths must be exact and sorted")
+                if migration_receipt.get("old_only_paths_sha256") != _canonical_json_sha256(old_only):
+                    raise SnapshotError("root migration receipt old_only_paths digest mismatch")
+                migration_receipt_sha256 = _canonical_json_sha256(migration_receipt)
+                prev_manifest = None
+                prev_files = {}
+                prev_generation = None
+            elif migration_receipt is not None:
+                raise SnapshotError("root migration receipt is invalid when canonical root is unchanged")
 
         generation = _generation_name()
         gen_dir = snapshots_dir / generation
@@ -261,7 +370,7 @@ def build_snapshot(
 
             raw = _read_with_retry(entry.absolute_path, max_retries, retry_delay)
             if raw is not None:
-                dest.write_bytes(raw)
+                _write_bytes_fsync(dest, raw)
                 sha = _sha256_bytes(raw)
                 file_states.append(FileState(
                     relative_path=entry.relative_path,
@@ -276,7 +385,7 @@ def build_snapshot(
                 if prev_generation:
                     stale_bytes = _previous_file_bytes(state_root, prev_generation, entry.relative_path)
                 if stale_bytes is not None:
-                    dest.write_bytes(stale_bytes)
+                    _write_bytes_fsync(dest, stale_bytes)
                     sha = _sha256_bytes(stale_bytes)
                     file_states.append(FileState(
                         relative_path=entry.relative_path,
@@ -296,6 +405,25 @@ def build_snapshot(
                         error="read_failed_no_prior_copy",
                     ))
                     counts["quarantined"] += 1
+
+        if migration_receipt is not None:
+            try:
+                new_inventory_sha256 = _inventory_sha256(file_states)
+                if migration_receipt.get("new_inventory_sha256") != new_inventory_sha256:
+                    raise SnapshotError("root migration receipt new inventory mismatch")
+                old_paths = {
+                    row[0] for row in _inventory_rows(
+                        list(_previous_file_map(_load_previous_manifest(state_root)).values())
+                    )
+                }
+                new_paths = {row[0] for row in _inventory_rows(file_states)}
+                actual_old_only = sorted(old_paths - new_paths)
+                if migration_receipt.get("old_only_paths") != actual_old_only:
+                    raise SnapshotError("root migration receipt old-only path set mismatch")
+            except Exception:
+                import shutil
+                shutil.rmtree(gen_dir, ignore_errors=True)
+                raise
 
         # Detect deletions: files in previous manifest but not seen now
         for prev_rel, prev_info in prev_files.items():
@@ -348,6 +476,10 @@ def build_snapshot(
                 for fs in sorted(file_states, key=lambda f: f.relative_path)
             ],
             "summary": dict(counts),
+            **({
+                "migration_receipt": migration_receipt,
+                "migration_receipt_sha256": migration_receipt_sha256,
+            } if migration_receipt is not None else {}),
         }
 
         # Write and fsync the immutable generation manifest before promotion.
@@ -379,6 +511,17 @@ def build_snapshot(
                     f"generation preparation failed: {type(exc).__name__}"
                 ) from exc
 
+        # A pointer may only reference a generation whose complete file tree
+        # and parent directory entry have reached durable storage.
+        _fsync_generation(gen_dir, snapshots_dir)
+
+        if not promote:
+            return SnapshotResult(
+                generation=generation,
+                manifest=manifest,
+                summary=dict(counts),
+            )
+
         # Atomic promotion via os.replace.  Keep the historical full-manifest
         # current.json shape for compatibility, and add an integrity pointer to
         # the immutable generation manifest.
@@ -405,6 +548,9 @@ def build_snapshot(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_current, current_path)
+        _fsync_directory(state_root)
+        if current_path.read_bytes() != current_bytes:
+            raise SnapshotError("current pointer readback failed")
 
         return SnapshotResult(
             generation=generation,
