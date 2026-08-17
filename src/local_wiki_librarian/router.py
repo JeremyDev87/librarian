@@ -49,6 +49,7 @@ class RouterConfig:
     demote_index: bool = True
     demote_history: bool = True
     follow_redirects: bool = True
+    include_zero_score_graph: bool = False
 
     def __post_init__(self) -> None:
         if self.graph_depth < 0 or self.graph_depth > 2:
@@ -214,10 +215,20 @@ class WikiRouter:
                 if not frontier:
                     break
 
-        # 3. Sort by adjusted score (authority-boosted/demoted)
+        # 3. Hide score-zero graph-only results at the presentation boundary.
+        # Graph nodes remain in ``seen_paths`` and the traversal frontier, so
+        # the default precision policy does not change bounded depth-2 graph
+        # reachability. Lexical/redirect score-zero results remain visible.
+        if not self.config.include_zero_score_graph:
+            results = [
+                result for result in results
+                if not (result.source == "graph" and result.score == 0.0)
+            ]
+
+        # 4. Sort by adjusted score (authority-boosted/demoted)
         results.sort(key=lambda r: r.score, reverse=True)
 
-        # 4. Truncate to k
+        # 5. Truncate to k
         return results[: self.config.k]
 
     def readback(self, path: str, max_lines: int = 120) -> str | None:

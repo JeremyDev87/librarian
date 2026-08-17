@@ -8,7 +8,12 @@ import pytest
 
 import local_wiki_librarian.refresh as refresh_module
 from local_wiki_librarian.cli import _audit, _health, _search, load_runtime
-from local_wiki_librarian.refresh import refresh_wiki, rollback_generation
+from local_wiki_librarian.refresh import (
+    build_root_migration_receipt,
+    refresh_wiki,
+    rollback_generation,
+    stage_refresh,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 WIKIMAP = ROOT / "src" / "local_wiki_librarian" / "_vendor" / "wikimap" / "wikimap.py"
@@ -86,6 +91,25 @@ def test_refresh_discovery_rejects_invalid_bundled_vendor(
     assert refresh_module._find_wikimap_path() is None
 
 
+def test_root_migration_rejects_extra_receipt_key_before_staging(tmp_path: Path) -> None:
+    old_wiki = tmp_path / "old-wiki"
+    new_wiki = tmp_path / "new-wiki"
+    state = tmp_path / "state"
+    _write_wiki(old_wiki, "Version One")
+    refresh_wiki(old_wiki, state, WIKIMAP)
+    _write_wiki(new_wiki, "Version Two")
+    receipt = build_root_migration_receipt(state, new_wiki)
+    receipt["unexpected"] = "must fail before generation creation"
+    current_before = (state / "current.json").read_bytes()
+    generations_before = {path.name for path in (state / "snapshots").iterdir()}
+
+    with pytest.raises(Exception, match="receipt schema mismatch"):
+        stage_refresh(new_wiki, state, WIKIMAP, migration_receipt=receipt)
+
+    assert (state / "current.json").read_bytes() == current_before
+    assert {path.name for path in (state / "snapshots").iterdir()} == generations_before
+
+
 def test_refresh_failure_preserves_current_and_removes_incomplete_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,6 +157,7 @@ def test_verified_runtime_rejects_promoted_index_tampering(tmp_path: Path) -> No
     _write_wiki(wiki, "Version One")
     result = refresh_wiki(wiki, state, WIKIMAP)
     index = state / "snapshots" / result.generation / ".wikimap/index.db"
+    index.chmod(0o644)
     index.write_bytes(index.read_bytes() + b"tamper")
 
     with pytest.raises(RuntimeError, match="wikimap index integrity"):

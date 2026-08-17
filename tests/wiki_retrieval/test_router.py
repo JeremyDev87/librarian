@@ -72,6 +72,39 @@ class TestRetrieverMode:
 
 
 class TestRouterSearch:
+    def test_graph_only_zero_score_is_hidden_by_default_and_opt_in_restores_it(
+        self, tmp_path: Path,
+    ) -> None:
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        _make_mini_wiki(snapshot)
+        adapter = WikimapAdapter(WIKIMAP_PATH, snapshot)
+        adapter.index()
+        authority = _make_authority([
+            AuthorityEntry(
+                relative_path="knowledge/policies/policy.md",
+                tier="current",
+                has_frontmatter=True,
+            ),
+            AuthorityEntry(
+                relative_path="knowledge/policies/guide.md",
+                tier="current",
+                has_frontmatter=True,
+            ),
+        ])
+
+        default_results = WikiRouter(
+            adapter, authority, RouterConfig(graph_depth=1),
+        ).search("split index policy")
+        legacy_results = WikiRouter(
+            adapter,
+            authority,
+            RouterConfig(graph_depth=1, include_zero_score_graph=True),
+        ).search("split index policy")
+
+        assert all(not (item.source == "graph" and item.score == 0.0) for item in default_results)
+        assert any(item.source == "graph" and item.score == 0.0 for item in legacy_results)
+
     def test_router_has_no_metadata_cue_injection_surface(self) -> None:
         assert not hasattr(WikiRouter, "_intent_authority_entries")
 

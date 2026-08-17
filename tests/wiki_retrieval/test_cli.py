@@ -15,6 +15,13 @@ from local_wiki_librarian.snapshot import build_snapshot
 from local_wiki_librarian.vendor import bundled_wikimap_path
 
 
+def test_cli_exposes_zero_score_graph_compatibility_opt_in() -> None:
+    args = cli_module.build_parser().parse_args([
+        "search", "query", "--include-zero-score-graph",
+    ])
+    assert args.include_zero_score_graph is True
+
+
 def test_audit_always_emits_common_status_contract(tmp_path) -> None:
     report = _audit(tmp_path / "missing-state")
     assert report["status"] == "degraded"
