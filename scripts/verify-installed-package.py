@@ -17,6 +17,7 @@ def _run(command: List[str], *, env: Optional[Dict[str, str]] = None) -> subproc
     clean_env = dict(os.environ if env is None else env)
     clean_env.pop("PYTHONPATH", None)
     clean_env.pop("PYTHONHOME", None)
+    clean_env.pop("PYTHONOPTIMIZE", None)
     return subprocess.run(
         command, check=True, capture_output=True, text=True, env=clean_env
     )
@@ -28,6 +29,7 @@ def _run_unchecked(
     clean_env = dict(os.environ if env is None else env)
     clean_env.pop("PYTHONPATH", None)
     clean_env.pop("PYTHONHOME", None)
+    clean_env.pop("PYTHONOPTIMIZE", None)
     return subprocess.run(
         command, check=False, capture_output=True, text=True, env=clean_env,
     )
@@ -39,12 +41,16 @@ def _json(command: list[str], *, env: dict[str, str]) -> dict:
 
 def _tree_digest(root: Path) -> str:
     rows = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        rows.append((path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+    for path in sorted(root.rglob("*")):
+        stat = path.stat()
+        rows.append((path.relative_to(root).as_posix(), stat.st_mode, stat.st_mtime_ns,
+                     hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None))
     return hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    if not __debug__:
+        raise SystemExit("verification requires assertions enabled; remove Python optimization")
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--runs", type=int, default=2)
@@ -63,12 +69,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         _run([str(python), "-m", "pip", "install", "--upgrade", "pip"])
         _run([str(python), "-m", "pip", "install", args.coexist_package, str(artifact)])
         _run([str(python), "-m", "pip", "check"])
-        _run([
+        installed_modules = json.loads(_run([
             str(python), "-c",
-            "import librarian, local_wiki_librarian; "
+            "import json, librarian, local_wiki_librarian; "
             "assert librarian.__name__ == 'librarian'; "
-            "assert local_wiki_librarian.__name__ == 'local_wiki_librarian'",
-        ])
+            "assert local_wiki_librarian.__name__ == 'local_wiki_librarian'; "
+            "print(json.dumps([librarian.__file__, local_wiki_librarian.__file__]))",
+        ]).stdout)
+        assert all(environment.resolve() in Path(path).resolve().parents for path in installed_modules)
 
         wiki = root / "wiki"
         page = wiki / "notes" / "policy.md"
@@ -98,9 +106,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             assert health["status"] == "ok"
             assert search["status"] == "ok"
             assert search["results"][0]["path"] == "notes/policy.md"
+            empty = _json([
+                str(cli), "ask", "?", "--state-root", str(state),
+                "--time-scope", "saved_knowledge",
+            ], env=env)
+            assert empty["status"] == "stopped"
+            assert empty["stop_reason"] == "NO_CANON_FOUND"
+            assert empty["answer"]["verified"] == []
+            assert empty["candidates"] == []
+            field = _json([
+                str(cli), "search", "title:retrieval", "--state-root", str(state),
+                "--time-scope", "saved_knowledge",
+            ], env=env)
+            assert field["status"] == "ok"
+            assert field["results"][0]["path"] == "notes/policy.md"
             assert audit["passed"] is True
             assert _tree_digest(wiki) == source_digest
             generations.append(refreshed["generation"])
+        assert len(set(generations)) == args.runs
 
         # Prove the installed maintenance entrypoint separates stage from
         # promotion and binds the latter to the exact current pointer.
@@ -177,6 +200,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         assert schema_probe.returncode == 0
         print(json.dumps({
             "status": "ok",
+            "assertions_enabled": __debug__,
+            "installed_modules": installed_modules,
+            "empty_query": empty,
+            "field_search": field,
+            "migration_denial": {"exit_code": denied.returncode, "payload": json.loads(denied.stdout)},
+            "rollback": rolled_back,
+            "restore": restored,
             "runs": args.runs,
             "distinct_generations": len(set(generations)),
             "search_path": "notes/policy.md",

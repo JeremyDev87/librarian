@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+from importlib.resources import files
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 import local_wiki_librarian.cli as cli_module
 from local_wiki_librarian.cli import _audit, _health, load_runtime
+from local_wiki_librarian.contracts import LibrarianPacket, LibrarianQuery
 from local_wiki_librarian.lexical import WikimapAdapter
 from local_wiki_librarian.manifest import build_authority_manifest
 from local_wiki_librarian.refresh import refresh_wiki
@@ -194,3 +198,75 @@ def test_cli_discovers_packaged_wikimap() -> None:
 
     assert path is not None
     assert path.name == "wikimap.py"
+
+
+@pytest.fixture
+def cli_hardening_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2] / "src"))
+    monkeypatch.delenv("LIBRARIAN_WIKIMAP_PATH", raising=False)
+    wiki = tmp_path / "wiki"
+    page = wiki / "notes/policy.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\nauthority: high\nstatus: active\ndomain: docs\n---\n"
+        "# Policy\natomic retrieval policy\n", encoding="utf-8",
+    )
+    (wiki / "catalog.md").write_text(
+        "| Trigger | Domain | First Load | Collections | Answer Compiler |\n"
+        "|---|---|---|---|---|\n"
+        "| policy | docs | [[notes/policy]] | `notes` | compiler |\n",
+        encoding="utf-8",
+    )
+    before = [(p.relative_to(wiki), p.read_bytes() if p.is_file() else None,
+               p.stat().st_mode, p.stat().st_mtime_ns) for p in sorted(wiki.rglob("*"))]
+    state = tmp_path / "state"
+    refreshed = subprocess.run([
+        sys.executable, "-m", "local_wiki_librarian.refresh",
+        "--wiki-root", str(wiki), "--state-root", str(state),
+    ], capture_output=True, text=True, check=True, timeout=30)
+    assert json.loads(refreshed.stdout)["status"] == "ok"
+    yield state
+    after = [(p.relative_to(wiki), p.read_bytes() if p.is_file() else None,
+              p.stat().st_mode, p.stat().st_mtime_ns) for p in sorted(wiki.rglob("*"))]
+    assert after == before
+
+
+@pytest.mark.parametrize("query,time_scope,status,stop_reason,verified", [
+    ("?", "saved_knowledge", "stopped", "NO_CANON_FOUND", []),
+    ("policy", "saved_knowledge", "ok", None, ["notes/policy.md"]),
+    ("title:policy", "saved_knowledge", "ok", None, ["notes/policy.md"]),
+    ("a title:policy", "saved_knowledge", "ok", None, ["notes/policy.md"]),
+    ("policy", "current", "stopped", "FRESH_SOURCE_REQUIRED", []),
+])
+def test_cli_hardening_packet(cli_hardening_state, query, time_scope, status, stop_reason, verified):
+    result = subprocess.run([
+        sys.executable, "-m", "local_wiki_librarian.cli", "ask", query,
+        "--state-root", str(cli_hardening_state), "--time-scope", time_scope,
+    ], capture_output=True, text=True, check=False, timeout=30)
+    assert result.returncode == 0, result.stderr
+    packet = json.loads(result.stdout)
+    assert (packet["status"], packet["stop_reason"], packet["answer"]["verified"]) == (
+        status, stop_reason, verified,
+    )
+    schema = json.loads(files("local_wiki_librarian").joinpath(
+        "schemas/librarian-packet.schema.json",
+    ).read_text(encoding="utf-8"))
+    assert set(schema["required"]) <= packet.keys() <= schema["properties"].keys()
+    assert schema["additionalProperties"] is False
+    assert packet.keys() == LibrarianPacket(LibrarianQuery(query)).to_dict().keys()
+    assert packet["schema_version"] == schema["properties"]["schema_version"]["const"] == 1
+
+
+@pytest.mark.parametrize("query", ["policy", "", "type:unsupported"])
+def test_cli_hardening_execution_error(cli_hardening_state: Path, query: str) -> None:
+    state = cli_hardening_state.parent / "missing" if query == "policy" else cli_hardening_state
+    result = subprocess.run([
+        sys.executable, "-m", "local_wiki_librarian.cli", "ask", query,
+        "--state-root", str(state), "--time-scope", "saved_knowledge",
+    ], capture_output=True, text=True, check=False, timeout=30)
+    assert result.returncode == 2, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["status"] == "error"
+    assert payload["error"]
+    assert "answer" not in payload
