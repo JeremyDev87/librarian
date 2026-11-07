@@ -1,6 +1,7 @@
 """Tests for the read-only wikimap lexical adapter."""
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -178,3 +179,84 @@ class TestRegression:
         assert not (parent / "MAP.md").exists()
         # Check no escaped.md pattern from --map-path vulnerability
         assert not (parent / "escaped.md").exists()
+
+
+@pytest.fixture(scope="module", params=[499, 500])
+def boundary_index(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> WikimapAdapter:
+    snapshot = tmp_path_factory.mktemp(f"query-boundary-{request.param}")
+    (snapshot / "park.md").write_text(
+        "---\ntitle: Park policy\ntags: [outdoors]\n---\n"
+        "# Walking\n\n공원 산책. exact phrase and literalneedle.\n"
+        "## Restricted\n\nNo destination here.\n", encoding="utf-8",
+    )
+    for index in range(request.param - 1):
+        (snapshot / f"filler-{index:03}.md").write_text(
+            "# Filler\n\nUnrelated material.\n", encoding="utf-8",
+        )
+    adapter = WikimapAdapter(WIKIMAP_PATH, snapshot)
+    adapter.index()
+    with sqlite3.connect(snapshot / ".wikimap/index.db") as db:
+        assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == request.param
+        has_fts = db.execute("SELECT 1 FROM sqlite_master WHERE name='sections_fts'").fetchone()
+        if request.param == 500 and not has_fts:
+            pytest.skip(f"SQLite {sqlite3.sqlite_version} lacks FTS5/trigram; 499-document linear tests still run")
+        if has_fts:
+            rows = db.execute("SELECT COUNT(*) FROM sections_fts").fetchone()[0]
+            sections = db.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
+            assert rows == (sections if request.param == 500 else 0)
+    return adapter
+
+
+@pytest.mark.parametrize("query", ["?", "!", "a", "가", "a 가 ? !"])
+def test_query_boundary_effective_empty(boundary_index: WikimapAdapter, query: str) -> None:
+    assert boundary_index.search(query) == []
+    assert boundary_index.last_terms == []
+    assert boundary_index.last_weak is True
+    assert boundary_index.last_partial is False
+
+
+@pytest.mark.parametrize("query", [
+    "공원에서", "공원", "literalneedle", '"exact phrase"',
+    "title:policy", "path:park", "heading:walking", "tag:outdoors",
+    "a title:policy", "공원에서 heading:walking",
+])
+def test_query_boundary_matches(boundary_index: WikimapAdapter, query: str) -> None:
+    assert [result.file for result in boundary_index.search(query)] == ["park.md"]
+
+
+def test_query_boundary_type_only(boundary_index: WikimapAdapter) -> None:
+    results = boundary_index.search("type:md", n=1000)
+    assert len(results) == len(list(boundary_index.snapshot_dir.glob("*.md")))
+    assert {result.file for result in results} == {
+        path.name for path in boundary_index.snapshot_dir.glob("*.md")
+    }
+
+
+@pytest.mark.parametrize("query", [
+    "nonexistent", '"phrase exact"', "heading:공원에서", "공원에서 heading:absent",
+    "공원에서 heading:restricted", "literalneedle heading:restricted",
+])
+def test_query_boundary_constraints(boundary_index: WikimapAdapter, query: str) -> None:
+    assert boundary_index.search(query) == []
+
+
+@pytest.mark.parametrize(("query", "error"), [
+    ("", "empty query"), ("   ", "empty query"), ('""', "empty query"),
+    ("type:unknown", "unknown type"), ("a type:unknown", "unknown type"),
+])
+def test_query_boundary_parse_errors(boundary_index: WikimapAdapter, query: str, error: str) -> None:
+    with pytest.raises(WikimapAdapterError, match=error):
+        boundary_index.search(query)
+
+
+@pytest.mark.parametrize(("program", "error"), [
+    ("import time; time.sleep(5)", "timed out"),
+    ("print('success')", "failed to parse"),
+    ('print(\'{"query":"?","results":[],"terms":[],"weak":true,"partial":false}\'); exit(2)', "exited 2"),
+])
+def test_query_boundary_subprocess_failures(tmp_path: Path, program: str, error: str) -> None:
+    executable = tmp_path / "wikimap.py"
+    executable.write_text(program, encoding="utf-8")
+    adapter = WikimapAdapter(executable, tmp_path, timeout=1)
+    with pytest.raises(WikimapAdapterError, match=error):
+        adapter.search("?")
