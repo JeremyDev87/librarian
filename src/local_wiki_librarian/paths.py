@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import errno
+import os
+import stat
+import tempfile
+from contextlib import contextmanager
 import posixpath
 import re
 from pathlib import Path
-from typing import Union
+from typing import Iterator, Union
 
 
 PathLike = Union[str, Path]
@@ -115,3 +120,79 @@ def validate_disjoint_roots(first: PathLike, second: PathLike) -> tuple[Path, Pa
             f"retrieval roots must not overlap physically: {first_root} <-> {second_root}"
         )
     return first_root, second_root
+
+
+@contextmanager
+def _directory_descriptor(root: PathLike, relative: PathLike = ".") -> Iterator[int]:
+    """Walk directory components without following replacements or links."""
+    resolve_within(root, relative)
+    descriptor = None
+    try:
+        root_path = Path(root).expanduser().absolute()
+        descriptor = os.open(root_path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for part in root_path.parts[1:] + Path(relative).parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise UnsafePathError(f"unsafe directory component: {relative}") from exc
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def open_regular_within(root: PathLike, relative: PathLike, flags: int = os.O_RDONLY) -> int:
+    """Return an owned nonblocking regular-file descriptor; caller closes it."""
+    resolve_within(root, relative)
+    path = Path(relative)
+    with _directory_descriptor(root, path.parent) as parent:
+        try:
+            descriptor = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=parent)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise UnsafePathError(f"unsafe file: {relative}") from exc
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise UnsafePathError(f"not a regular file: {relative}")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+
+def read_bytes_within(root: PathLike, relative: PathLike) -> bytes:
+    """Read only the regular file opened beneath the supplied directory root."""
+    with os.fdopen(open_regular_within(root, relative), "rb") as handle:
+        return handle.read()
+
+
+def write_bytes_atomic(root: PathLike, relative: PathLike, payload: bytes) -> None:
+    """Durably replace one owned file using a unique descriptor-backed temporary."""
+    target = resolve_within(root, relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _directory_descriptor(root, Path(relative).parent) as parent:
+        try:
+            existing = os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and not stat.S_ISREG(existing.st_mode):
+            raise UnsafePathError(f"not a regular destination: {relative}")
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(Path(temporary).name, target.name, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+            if read_bytes_within(root, relative) != payload:
+                raise RuntimeError(f"atomic write readback failed: {relative}")
+        finally:
+            try:
+                os.unlink(Path(temporary).name, dir_fd=parent)
+            except FileNotFoundError:
+                pass

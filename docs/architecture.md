@@ -41,3 +41,26 @@ Application metadata such as `source_role`, `domain`, or `layer` is preserved fo
 The Python import namespace is `local_wiki_librarian`. Wikimap and its MIT license/provenance are package data under `_vendor/wikimap`; the Librarian Packet schema is under `schemas`. Installed wheels therefore do not depend on a source checkout layout.
 
 The supported runtime is Python 3.9+ on Linux and macOS. POSIX file locking is required. This repository contains no real knowledge-base content, generated runtime state, credentials, or machine-specific paths.
+
+## Filesystem failure boundary
+
+Markdown reads, prior-generation fallback, and state-file reads use directory
+file descriptors with no-follow traversal. Final files must be regular files and
+are opened nonblocking, so a FIFO cannot hang a refresh. Static source symlinks
+are excluded; a link or nonregular replacement after discovery is refused.
+Discovery errors and unexplained missing inventory entries fail closed. Ordinary
+file-read errors retain bounded retries and snapshot stale/quarantine behavior;
+refresh requires a fully fresh candidate.
+
+State writes use a unique temporary file descriptor, file fsync, atomic replace,
+directory fsync, and descriptor-based readback. Pre-replace failure preserves the
+old pointer. An error after replace is reported as an error even if the new
+pointer is visible; both complete generations are retained, without automatic
+rollback. Only the writer's own temporary file is removed. Existing predictable
+temporary filenames are ignored. The shared no-follow regular-file lock preserves
+the cooperative single-writer contract.
+
+These checks protect source bytes, modes, mtimes, and inventory; atime is excluded.
+They do not provide an atomic whole-source-tree view or isolation from an arbitrary
+same-UID process that can rewrite owned state. Generation permissions are defense
+in depth for cooperative writers, not an immutability guarantee.

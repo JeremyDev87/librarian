@@ -41,6 +41,14 @@ def _read_current(state_root: Path) -> dict:
     return json.loads(current.read_text(encoding="utf-8"))
 
 
+def _source_state(root):
+    return [
+        (str(path.relative_to(root)), path.lstat().st_mode, path.lstat().st_mtime_ns,
+         os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
+        for path in sorted(root.rglob("*"))
+    ]
+
+
 # ---------------------------------------------------------------------------
 # discover_markdown
 # ---------------------------------------------------------------------------
@@ -339,3 +347,260 @@ class TestConcurrency:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_boundary_discovery_error_refuses_partial_snapshot(tmp_path, monkeypatch, existing):
+    import local_wiki_librarian.snapshot as snapshot
+    wiki, state = tmp_path / "wiki", tmp_path / "state"
+    _make_wiki(wiki, {"good.md": "# Good", "blocked/page.md": "# Hidden"})
+    if existing:
+        build_snapshot(wiki, state)
+    before = (state / "current.json").read_bytes() if existing else None
+    real_walk = os.walk
+
+    def incomplete_walk(root, **kwargs):
+        yield str(root), [], ["good.md"]
+        callback = kwargs.get("onerror")
+        if callback:
+            callback(PermissionError("injected unreadable subtree"))
+
+    monkeypatch.setattr(snapshot.os, "walk", incomplete_walk)
+    with pytest.raises(SnapshotError):
+        build_snapshot(wiki, state)
+    monkeypatch.setattr(snapshot.os, "walk", real_walk)
+    assert ((state / "current.json").read_bytes() if existing else None) == before
+    assert existing or not (state / "current.json").exists()
+
+
+@pytest.mark.parametrize("replacement", ["leaf", "parent"])
+def test_boundary_source_replaced_after_discovery(tmp_path, monkeypatch, replacement):
+    import local_wiki_librarian.snapshot as snapshot
+    wiki, state, outside = tmp_path / "wiki", tmp_path / "state", tmp_path / "outside"
+    _make_wiki(wiki, {"dir/page.md": "# Original", "good.md": "# Good"})
+    _make_wiki(outside, {"page.md": "EXTERNAL SENTINEL"})
+    build_snapshot(wiki, state)
+    before = (state / "current.json").read_bytes()
+    original = snapshot.discover_markdown
+    source_after_injection = []
+    outside_before = _source_state(outside)
+
+    def swap(root):
+        entries = original(root)
+        if replacement == "leaf":
+            (wiki / "dir/page.md").unlink()
+            (wiki / "dir/page.md").symlink_to(outside / "page.md")
+        else:
+            (wiki / "dir").rename(wiki / "saved")
+            (wiki / "dir").symlink_to(outside, target_is_directory=True)
+        source_after_injection.extend(_source_state(wiki))
+        return entries
+
+    monkeypatch.setattr(snapshot, "discover_markdown", swap)
+    with pytest.raises(SnapshotError):
+        build_snapshot(wiki, state)
+    assert (state / "current.json").read_bytes() == before
+    assert _source_state(wiki) == source_after_injection
+    assert _source_state(outside) == outside_before
+    assert (outside / "page.md").read_bytes() == b"EXTERNAL SENTINEL"
+    assert all(b"EXTERNAL SENTINEL" not in p.read_bytes() for p in (state / "snapshots").rglob("*.md"))
+
+
+@pytest.mark.parametrize("name", ["snapshots", "current.json", ".librarian-snapshot.lock"])
+def test_boundary_state_symlink_preserves_external_target(tmp_path, name):
+    wiki, state, outside = tmp_path / "wiki", tmp_path / "state", tmp_path / "outside"
+    _make_wiki(wiki, {"page.md": "# Page"})
+    state.mkdir()
+    if name == "snapshots":
+        outside.mkdir()
+        (outside / "sentinel").write_bytes(b"SENTINEL")
+    else:
+        outside.write_bytes(b"SENTINEL")
+    before = outside.stat()
+    (state / name).symlink_to(outside)
+    with pytest.raises(SnapshotError):
+        build_snapshot(wiki, state)
+    after = outside.stat()
+    assert (before.st_mode, before.st_mtime_ns) == (after.st_mode, after.st_mtime_ns)
+    assert (outside / "sentinel" if name == "snapshots" else outside).read_bytes() == b"SENTINEL"
+
+
+@pytest.mark.parametrize("failure", ["exists", "permission"])
+def test_boundary_omitted_previous_file_is_not_deletion(tmp_path, monkeypatch, failure):
+    import local_wiki_librarian.snapshot as snapshot
+    wiki, state = tmp_path / "wiki", tmp_path / "state"
+    _make_wiki(wiki, {"a.md": "# A", "b.md": "# B"})
+    build_snapshot(wiki, state)
+    before = (state / "current.json").read_bytes()
+    original = snapshot.discover_markdown
+    monkeypatch.setattr(snapshot, "discover_markdown", lambda root: [e for e in original(root) if e.relative_path == "a.md"])
+    if failure == "permission":
+        original_lstat = Path.lstat
+
+        def denied(path, *args, **kwargs):
+            if path == wiki / "b.md":
+                raise PermissionError("cannot confirm deletion")
+            return original_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", denied)
+    with pytest.raises(SnapshotError):
+        build_snapshot(wiki, state)
+    assert (state / "current.json").read_bytes() == before
+
+
+def test_boundary_fifo_never_blocks(tmp_path):
+    import subprocess
+    wiki, state = tmp_path / "wiki", tmp_path / "state"
+    _make_wiki(wiki, {"good.md": "# Good"})
+    os.mkfifo(wiki / "pipe.md")
+    code = "from pathlib import Path; from local_wiki_librarian.snapshot import build_snapshot; build_snapshot(Path(__import__('sys').argv[1]), Path(__import__('sys').argv[2]))"
+    result = subprocess.run([sys.executable, "-c", code, str(wiki), str(state)], timeout=5, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout
+    assert "SnapshotError" in result.stderr
+    assert not (state / "current.json").exists()
+
+
+@pytest.mark.parametrize("component", ["generation", "file", "traversal"])
+def test_boundary_previous_fallback_is_confined(tmp_path, monkeypatch, component):
+    import local_wiki_librarian.paths as paths
+    wiki, state, outside = tmp_path / "wiki", tmp_path / "state", tmp_path / "outside"
+    _make_wiki(wiki, {"page.md": "# Safe", "good.md": "# Good"})
+    _make_wiki(outside, {"page.md": "EXTERNAL"})
+    first = build_snapshot(wiki, state)
+    generation = state / "snapshots" / first.generation
+    if component == "generation":
+        generation.rename(generation.with_name("saved"))
+        generation.symlink_to(outside)
+    elif component == "file":
+        (generation / "page.md").unlink()
+        (generation / "page.md").symlink_to(outside / "page.md")
+    else:
+        pointer = _read_current(state)
+        pointer["generation"] = "../outside"
+        (state / "current.json").write_text(json.dumps(pointer))
+    before = (state / "current.json").read_bytes()
+    original = paths.os.open
+
+    def fail_source(path, flags, mode=0o777, *, dir_fd=None):
+        if path == "page.md" and dir_fd is not None:
+            directory = os.fstat(dir_fd)
+            if (directory.st_dev, directory.st_ino) == (wiki.stat().st_dev, wiki.stat().st_ino):
+                raise PermissionError("ordinary source read failure")
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(paths.os, "open", fail_source)
+    with pytest.raises(SnapshotError):
+        build_snapshot(wiki, state)
+    assert (state / "current.json").read_bytes() == before
+    assert (outside / "page.md").read_bytes() == b"EXTERNAL"
+
+
+@pytest.mark.parametrize("phase", ["temp", "file_fsync", "replace", "directory_fsync", "readback", "interrupt"])
+def test_boundary_pointer_write_failure_keeps_referenced_generation(tmp_path, monkeypatch, phase):
+    import local_wiki_librarian.paths as paths
+    wiki, state = tmp_path / "wiki", tmp_path / "state"
+    _make_wiki(wiki, {"page.md": "# First"})
+    first = build_snapshot(wiki, state)
+    before = (state / "current.json").read_bytes()
+    (wiki / "page.md").write_text("# Second")
+    replaced = False
+    writing_pointer = False
+    original_replace, original_read = paths.os.replace, paths.read_bytes_within
+    original_fsync, original_temp = paths.os.fsync, paths.tempfile.mkstemp
+
+    def replace(source, destination, **kwargs):
+        nonlocal replaced
+        if destination == "current.json":
+            if phase == "replace":
+                raise OSError("injected before replace")
+            if phase == "interrupt":
+                raise KeyboardInterrupt("injected cancellation")
+            original_replace(source, destination, **kwargs)
+            replaced = True
+            return
+        return original_replace(source, destination, **kwargs)
+
+    def fsync(descriptor):
+        if phase == "file_fsync" and writing_pointer:
+            raise OSError("injected temporary-file fsync")
+        if phase == "directory_fsync" and replaced:
+            raise OSError("injected after replace fsync")
+        return original_fsync(descriptor)
+
+    def read(root, relative):
+        if phase == "readback" and replaced and str(relative) == "current.json":
+            raise OSError("injected after replace readback")
+        return original_read(root, relative)
+
+    def temporary(*args, **kwargs):
+        nonlocal writing_pointer
+        writing_pointer = kwargs.get("prefix") == ".current.json."
+        if phase == "temp" and kwargs.get("prefix") == ".current.json.":
+            raise OSError("injected before temporary write")
+        return original_temp(*args, **kwargs)
+
+    monkeypatch.setattr(paths.os, "replace", replace)
+    monkeypatch.setattr(paths.os, "fsync", fsync)
+    monkeypatch.setattr(paths, "read_bytes_within", read)
+    monkeypatch.setattr(paths.tempfile, "mkstemp", temporary)
+    with pytest.raises(KeyboardInterrupt if phase == "interrupt" else SnapshotError):
+        build_snapshot(wiki, state)
+    after = (state / "current.json").read_bytes()
+    pointer = json.loads(after)
+    referenced = state / "snapshots" / pointer["generation"]
+    assert referenced.is_dir(), f"dangling pointer after {phase}"
+    assert (referenced / "manifest.json").is_file()
+    assert (state / "snapshots" / first.generation / "manifest.json").is_file()
+    assert not list(state.glob(".current.json.*.tmp"))
+    if phase in {"temp", "file_fsync", "replace", "interrupt"}:
+        assert after == before, f"current changed before replacement: {phase}"
+    else:
+        assert after != before and (referenced / "page.md").read_bytes() == b"# Second"
+    if phase == "interrupt":
+        monkeypatch.undo()
+        resumed = build_snapshot(wiki, state)
+        assert _read_current(state)["generation"] == resumed.generation
+
+
+def test_boundary_predictable_snapshot_temp_is_not_touched(tmp_path, monkeypatch):
+    import local_wiki_librarian.snapshot as snapshot
+    wiki, state, sentinel = tmp_path / "wiki", tmp_path / "state", tmp_path / "sentinel"
+    _make_wiki(wiki, {"page.md": "# Safe"})
+    state.mkdir()
+    sentinel.write_bytes(b"SENTINEL")
+    before = sentinel.stat()
+    link = state / ".current.fixed-generation.tmp"
+    link.symlink_to(sentinel)
+    monkeypatch.setattr(snapshot, "_generation_name", lambda: "fixed-generation")
+    result = build_snapshot(wiki, state)
+    assert result.generation == _read_current(state)["generation"]
+    assert sentinel.read_bytes() == b"SENTINEL"
+    assert sentinel.stat().st_mtime_ns == before.st_mtime_ns
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("prior", [False, True])
+def test_boundary_ordinary_read_failure_retries_then_quarantines_or_stales(tmp_path, monkeypatch, prior):
+    import local_wiki_librarian.paths as paths
+    wiki, state = tmp_path / "wiki", tmp_path / "state"
+    _make_wiki(wiki, {"page.md": "# ORIGINAL", "good.md": "# Good"})
+    if prior:
+        build_snapshot(wiki, state)
+    original = paths.os.open
+    attempts = 0
+    source_before = _source_state(wiki)
+
+    def fail(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal attempts
+        if path == "page.md" and dir_fd is not None and os.fstat(dir_fd).st_ino == wiki.stat().st_ino:
+            attempts += 1
+            raise PermissionError("ordinary failure")
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(paths.os, "open", fail)
+    result = build_snapshot(wiki, state)
+    assert attempts == 3
+    assert result.summary["stale" if prior else "quarantined"] == 1
+    copied = state / "snapshots" / result.generation / "page.md"
+    assert copied.read_bytes() == b"# ORIGINAL" if prior else not copied.exists()
+    assert _source_state(wiki) == source_before
