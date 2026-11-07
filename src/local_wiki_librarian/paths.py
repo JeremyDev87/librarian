@@ -187,7 +187,7 @@ def write_bytes_atomic(root: PathLike, relative: PathLike, payload: bytes) -> No
             existing = None
         if existing is not None and not stat.S_ISREG(existing.st_mode):
             raise UnsafePathError(f"not a regular destination: {relative}")
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+        descriptor, temporary = tempfile.mkstemp(prefix=".write-", suffix=".tmp", dir=target.parent)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(payload)
