@@ -503,6 +503,7 @@ def test_boundary_pointer_write_failure_keeps_referenced_generation(tmp_path, mo
     first = build_snapshot(wiki, state)
     before = (state / "current.json").read_bytes()
     (wiki / "page.md").write_text("# Second")
+    state_entries = set(state.iterdir())
     replaced = False
     writing_pointer = False
     original_replace, original_read = paths.os.replace, paths.read_bytes_within
@@ -534,8 +535,8 @@ def test_boundary_pointer_write_failure_keeps_referenced_generation(tmp_path, mo
 
     def temporary(*args, **kwargs):
         nonlocal writing_pointer
-        writing_pointer = kwargs.get("prefix") == ".current.json."
-        if phase == "temp" and kwargs.get("prefix") == ".current.json.":
+        writing_pointer = kwargs.get("dir") == state
+        if phase == "temp" and writing_pointer:
             raise OSError("injected before temporary write")
         return original_temp(*args, **kwargs)
 
@@ -551,7 +552,7 @@ def test_boundary_pointer_write_failure_keeps_referenced_generation(tmp_path, mo
     assert referenced.is_dir(), f"dangling pointer after {phase}"
     assert (referenced / "manifest.json").is_file()
     assert (state / "snapshots" / first.generation / "manifest.json").is_file()
-    assert not list(state.glob(".current.json.*.tmp"))
+    assert set(state.iterdir()) == state_entries
     if phase in {"temp", "file_fsync", "replace", "interrupt"}:
         assert after == before, f"current changed before replacement: {phase}"
     else:

@@ -103,6 +103,18 @@ def test_boundary_descriptor_reader_handles_hidden_korean_file(tmp_path):
     assert read_bytes_within(tmp_path, ".비밀/기록.md") == "# 한글".encode()
 
 
+@pytest.mark.parametrize("name", ["x" * 250 + ".md", "한" + "x" * 249 + ".md"], ids=["ascii", "korean"])
+def test_atomic_write_accepts_long_filename(tmp_path: Path, name: str) -> None:
+    from local_wiki_librarian.paths import write_bytes_atomic
+    target = tmp_path / name
+    target.write_bytes(b"OLD")
+
+    write_bytes_atomic(tmp_path, name, b"NEW")
+
+    assert target.read_bytes() == b"NEW"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 @pytest.mark.parametrize("component", ["leaf", "parent"])
 def test_boundary_descriptor_open_rejects_last_moment_symlink(tmp_path, monkeypatch, component):
     import os
