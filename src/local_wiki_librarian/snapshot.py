@@ -26,7 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .paths import UnsafePathError, validate_disjoint_roots
+from .paths import (
+    UnsafePathError, open_regular_within, read_bytes_within, resolve_within,
+    validate_disjoint_roots, write_bytes_atomic,
+)
 
 __all__ = [
     "FileState",
@@ -87,16 +90,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_bytes_fsync(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(str(path), os.O_RDONLY)
+    descriptor = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(descriptor)
     finally:
@@ -118,10 +113,7 @@ def _fsync_generation(generation_dir: Path, snapshots_dir: Path) -> None:
 
 def _is_symlink(path: Path) -> bool:
     """Check symlink without following."""
-    try:
-        return path.is_symlink()
-    except OSError:
-        return False
+    return path.is_symlink()
 
 
 def discover_markdown(canonical_root: Path) -> list[FileEntry]:
@@ -130,7 +122,12 @@ def discover_markdown(canonical_root: Path) -> list[FileEntry]:
     Symlinks are skipped and reported as quarantine candidates by the caller.
     """
     entries: list[FileEntry] = []
-    for dirpath, dirnames, filenames in os.walk(canonical_root, followlinks=False):
+    def traversal_error(error: OSError) -> None:
+        raise SnapshotError(f"fail-closed: incomplete Markdown discovery: {error}") from error
+
+    for dirpath, dirnames, filenames in os.walk(
+        canonical_root, followlinks=False, onerror=traversal_error,
+    ):
         # Skip symlinked directories
         dirnames[:] = sorted(
             d for d in dirnames
@@ -156,12 +153,12 @@ def discover_markdown(canonical_root: Path) -> list[FileEntry]:
 
 
 def _read_with_retry(
-    path: Path, max_retries: int = _MAX_RETRIES, delay: float = _RETRY_DELAY_SECONDS
+    root: Path, relative: str, max_retries: int = _MAX_RETRIES, delay: float = _RETRY_DELAY_SECONDS
 ) -> bytes | None:
     """Read file bytes with bounded retry. Returns ``None`` on persistent failure."""
     for attempt in range(max_retries):
         try:
-            return path.read_bytes()
+            return read_bytes_within(root, relative)
         except OSError:
             if delay > 0 and attempt < max_retries - 1:
                 time.sleep(delay)
@@ -170,16 +167,19 @@ def _read_with_retry(
 
 def _load_previous_manifest(state_root: Path) -> dict | None:
     """Load the current.json manifest if it exists."""
-    current_path = state_root / _CURRENT_FILENAME
-    if not current_path.is_file():
-        return None
     try:
-        data = json.loads(current_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and "files" in data:
-            return data
-    except (OSError, json.JSONDecodeError):
-        pass
-    return None
+        data = json.loads(read_bytes_within(state_root, _CURRENT_FILENAME))
+    except FileNotFoundError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        raise SnapshotError("previous snapshot manifest is malformed")
+    generation = data.get("generation")
+    if not isinstance(generation, str) or not generation or len(Path(generation).parts) != 1:
+        raise SnapshotError("previous snapshot generation is malformed")
+    resolve_within(state_root, Path("snapshots") / generation)
+    for entry in data["files"]:
+        resolve_within(state_root / "snapshots" / generation, entry["relative_path"])
+    return data
 
 
 def _previous_file_map(manifest: dict | None) -> dict[str, dict]:
@@ -226,12 +226,11 @@ def _inventory_sha256(entries: list[dict] | list[FileState]) -> str:
 
 def _previous_file_bytes(state_root: Path, generation: str, relative_path: str) -> bytes | None:
     """Read bytes of a file from a previous generation's snapshot."""
-    prev_path = state_root / "snapshots" / generation / relative_path
-    if not prev_path.is_file():
-        return None
+    resolve_within(state_root, Path("snapshots") / generation)
+    resolve_within(state_root / "snapshots" / generation, relative_path)
     try:
-        return prev_path.read_bytes()
-    except OSError:
+        return read_bytes_within(state_root, Path("snapshots") / generation / relative_path)
+    except FileNotFoundError:
         return None
 
 
@@ -282,14 +281,16 @@ def build_snapshot(
     # Ensure state root exists (but not under canonical)
     state_root.mkdir(parents=True, exist_ok=True)
 
-    snapshots_dir = state_root / "snapshots"
-    snapshots_dir.mkdir(exist_ok=True)
+    try:
+        snapshots_dir = resolve_within(state_root, "snapshots")
+        snapshots_dir.mkdir(exist_ok=True)
+    except (OSError, UnsafePathError) as exc:
+        raise SnapshotError(f"unsafe snapshots directory: {exc}") from exc
 
     # Acquire single-writer lock
-    lock_path = state_root / _LOCK_FILENAME
     try:
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError as exc:
+        lock_fd = open_regular_within(state_root, _LOCK_FILENAME, os.O_CREAT | os.O_RDWR)
+    except (OSError, UnsafePathError) as exc:
         raise SnapshotError(f"cannot create lock file: {exc}") from exc
 
     try:
@@ -328,7 +329,7 @@ def build_snapshot(
                 }
                 if set(migration_receipt) != expected_receipt_keys:
                     raise SnapshotError("root migration receipt schema mismatch")
-                current_payload = (state_root / _CURRENT_FILENAME).read_bytes()
+                current_payload = read_bytes_within(state_root, _CURRENT_FILENAME)
                 expected = {
                     "schema_version": 1,
                     "expected_current_generation": prev_generation,
@@ -365,12 +366,9 @@ def build_snapshot(
 
         for entry in entries:
             seen_paths.add(entry.relative_path)
-            dest = gen_dir / entry.relative_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-
-            raw = _read_with_retry(entry.absolute_path, max_retries, retry_delay)
+            raw = _read_with_retry(canonical_root, entry.relative_path, max_retries, retry_delay)
             if raw is not None:
-                _write_bytes_fsync(dest, raw)
+                write_bytes_atomic(gen_dir, entry.relative_path, raw)
                 sha = _sha256_bytes(raw)
                 file_states.append(FileState(
                     relative_path=entry.relative_path,
@@ -385,7 +383,7 @@ def build_snapshot(
                 if prev_generation:
                     stale_bytes = _previous_file_bytes(state_root, prev_generation, entry.relative_path)
                 if stale_bytes is not None:
-                    _write_bytes_fsync(dest, stale_bytes)
+                    write_bytes_atomic(gen_dir, entry.relative_path, stale_bytes)
                     sha = _sha256_bytes(stale_bytes)
                     file_states.append(FileState(
                         relative_path=entry.relative_path,
@@ -429,11 +427,10 @@ def build_snapshot(
         for prev_rel, prev_info in prev_files.items():
             if prev_rel not in seen_paths:
                 # Verify with lstat that it's genuinely gone
-                prev_abs = canonical_root / prev_rel
+                prev_abs = resolve_within(canonical_root, prev_rel)
                 try:
                     prev_abs.lstat()
-                    # File still exists (maybe race?) — skip, don't mark deleted
-                    continue
+                    raise SnapshotError(f"incomplete discovery: omitted existing file {prev_rel}")
                 except FileNotFoundError:
                     file_states.append(FileState(
                         relative_path=prev_rel,
@@ -442,10 +439,8 @@ def build_snapshot(
                         state="deleted",
                     ))
                     counts["deleted"] += 1
-                except OSError:
-                    # Permission denied or other error — can't confirm deletion,
-                    # preserve old copy rather than risk false deletion.
-                    continue
+                except OSError as exc:
+                    raise SnapshotError(f"cannot confirm deletion: {prev_rel}") from exc
 
         # Fail-closed: refuse promotion if zero usable Markdown
         usable = counts["copied"] + counts["stale"]
@@ -483,14 +478,10 @@ def build_snapshot(
         }
 
         # Write and fsync the immutable generation manifest before promotion.
-        manifest_path = gen_dir / "manifest.json"
         manifest_bytes = json.dumps(
             manifest, indent=2, ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
-        with manifest_path.open("wb") as handle:
-            handle.write(manifest_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
+        write_bytes_atomic(gen_dir, "manifest.json", manifest_bytes)
 
         pointer_metadata: dict = {}
         if prepare_generation is not None:
@@ -538,19 +529,10 @@ def build_snapshot(
             **previous_integrity,
             **pointer_metadata,
         }
-        current_path = state_root / _CURRENT_FILENAME
-        tmp_current = state_root / f".current.{generation}.tmp"
         current_bytes = json.dumps(
             current_payload, indent=2, ensure_ascii=False, sort_keys=True
         ).encode("utf-8")
-        with tmp_current.open("wb") as handle:
-            handle.write(current_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_current, current_path)
-        _fsync_directory(state_root)
-        if current_path.read_bytes() != current_bytes:
-            raise SnapshotError("current pointer readback failed")
+        write_bytes_atomic(state_root, _CURRENT_FILENAME, current_bytes)
 
         return SnapshotResult(
             generation=generation,
@@ -558,6 +540,8 @@ def build_snapshot(
             summary=dict(counts),
         )
 
+    except (OSError, UnsafePathError) as exc:
+        raise SnapshotError(f"unsafe or unreadable snapshot input: {exc}") from exc
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

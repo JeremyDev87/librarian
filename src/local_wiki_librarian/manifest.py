@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 from .authority import AuthorityManifest, compile_authority
-from .paths import resolve_within
+from .paths import read_bytes_within, resolve_within, write_bytes_atomic
 from .snapshot import _CURRENT_FILENAME
 
 __all__ = [
@@ -52,19 +52,15 @@ def _materialize_verified_view(
 
 def load_verified_generation(state_root: Path) -> tuple[dict, Path, dict]:
     """Load a current generation after verifying pointer, manifest, and files."""
-    state_root = Path(state_root)
-    current_path = resolve_within(state_root, _CURRENT_FILENAME)
-    if not current_path.is_file():
-        raise FileNotFoundError(f"no snapshot current.json in {state_root}")
-    current = json.loads(current_path.read_text(encoding="utf-8"))
+    state_root = resolve_within(state_root, ".")
+    current = json.loads(read_bytes_within(state_root, _CURRENT_FILENAME))
     if current.get("schema_version") != 1:
         raise RuntimeError("unsupported current snapshot schema")
     generation = current.get("generation")
     if not isinstance(generation, str) or not generation:
         raise RuntimeError("invalid snapshot generation")
     gen_dir = resolve_within(resolve_within(state_root, "snapshots"), generation)
-    manifest_path = resolve_within(gen_dir, "manifest.json")
-    manifest_bytes = manifest_path.read_bytes()
+    manifest_bytes = read_bytes_within(state_root, Path("snapshots") / generation / "manifest.json")
     if current.get("manifest_sha256") != hashlib.sha256(manifest_bytes).hexdigest():
         raise RuntimeError("current snapshot manifest integrity check failed")
     manifest = json.loads(manifest_bytes)
@@ -91,9 +87,7 @@ def load_verified_generation(state_root: Path) -> tuple[dict, Path, dict]:
         seen_paths.add(relative)
         path = resolve_within(gen_dir, relative)
         if state in {"copied", "stale"}:
-            if not path.is_file():
-                raise RuntimeError("generation manifest references a missing snapshot file")
-            payload = path.read_bytes()
+            payload = read_bytes_within(state_root, Path("snapshots") / generation / relative)
             if entry.get("size") != len(payload):
                 raise RuntimeError(f"snapshot file integrity mismatch (size): {relative}")
             if hashlib.sha256(payload).hexdigest() != entry.get("sha256"):
@@ -118,10 +112,7 @@ def load_verified_generation(state_root: Path) -> tuple[dict, Path, dict]:
         expected = current.get(pointer_key)
         if expected is None:
             continue
-        sidecar = resolve_within(gen_dir, relative)
-        if not sidecar.is_file():
-            raise RuntimeError(f"{label} is missing from promoted generation")
-        payload = sidecar.read_bytes()
+        payload = read_bytes_within(state_root, Path("snapshots") / generation / relative)
         if hashlib.sha256(payload).hexdigest() != expected:
             raise RuntimeError(f"{label} integrity check failed")
         payloads[relative] = payload
@@ -140,16 +131,15 @@ def build_authority_manifest(state_root: Path) -> AuthorityManifest:
     Raises:
         FileNotFoundError: If no snapshot exists.
     """
-    state_root = Path(state_root)
+    state_root = resolve_within(state_root, ".")
     current, gen_dir, _ = load_verified_generation(state_root)
     generation = current["generation"]
     manifest = compile_authority(gen_dir, generation)
 
     # Write authority manifest to state root
-    authority_path = state_root / _AUTHORITY_FILENAME
-    authority_path.write_text(
-        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
+    write_bytes_atomic(
+        state_root, _AUTHORITY_FILENAME,
+        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8"),
     )
 
     return manifest
@@ -157,20 +147,22 @@ def build_authority_manifest(state_root: Path) -> AuthorityManifest:
 
 def load_authority_manifest(state_root: Path) -> dict | None:
     """Load generation-local authority first, then the legacy projection."""
-    state_root = Path(state_root)
-    current_path = state_root / _CURRENT_FILENAME
-    if current_path.is_file():
-        current = json.loads(current_path.read_text(encoding="utf-8"))
+    state_root = resolve_within(state_root, ".")
+    try:
+        current_payload = read_bytes_within(state_root, _CURRENT_FILENAME)
+    except FileNotFoundError:
+        current_payload = None
+    if current_payload is not None:
+        current = json.loads(current_payload)
         generation = current.get("generation")
         expected = current.get("authority_sha256")
         if isinstance(generation, str) and expected:
-            path = resolve_within(resolve_within(state_root, "snapshots"), generation)
-            path = resolve_within(path, _AUTHORITY_FILENAME)
-            payload = path.read_bytes()
+            resolve_within(resolve_within(state_root, "snapshots"), generation)
+            payload = read_bytes_within(state_root, Path("snapshots") / generation / _AUTHORITY_FILENAME)
             if hashlib.sha256(payload).hexdigest() != expected:
                 raise RuntimeError("authority manifest integrity check failed")
             return json.loads(payload)
-    path = state_root / _AUTHORITY_FILENAME
-    if not path.is_file():
+    try:
+        return json.loads(read_bytes_within(state_root, _AUTHORITY_FILENAME))
+    except FileNotFoundError:
         return None
-    return json.loads(path.read_text(encoding="utf-8"))

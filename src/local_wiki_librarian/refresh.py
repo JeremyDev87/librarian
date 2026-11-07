@@ -22,7 +22,10 @@ from typing import Any, Iterator, Optional
 
 from .authority import compile_authority
 from .lexical import WikimapAdapter
-from .paths import resolve_within
+from .paths import (
+    _directory_descriptor, open_regular_within, read_bytes_within, resolve_within,
+    validate_disjoint_roots, write_bytes_atomic,
+)
 from .snapshot import (
     SnapshotError,
     SnapshotResult,
@@ -90,40 +93,11 @@ def _find_wikimap_path() -> Path | None:
         return None
 
 
-def _write_fsync(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _write_atomic(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    try:
-        _write_fsync(tmp, payload)
-        os.replace(tmp, path)
-        _fsync_directory(path.parent)
-        if path.read_bytes() != payload:
-            raise RuntimeError(f"atomic write readback failed: {path.name}")
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
 @contextmanager
 def _writer_lock(state_root: Path) -> Iterator[None]:
+    resolve_within(state_root, _LOCK_FILENAME)
     state_root.mkdir(parents=True, exist_ok=True)
-    lock_path = state_root / _LOCK_FILENAME
-    descriptor = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    descriptor = open_regular_within(state_root, _LOCK_FILENAME, os.O_CREAT | os.O_RDWR)
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -139,13 +113,15 @@ def _writer_lock(state_root: Path) -> Iterator[None]:
 
 
 def _current_bytes(state_root: Path) -> bytes | None:
-    path = state_root / "current.json"
-    return path.read_bytes() if path.is_file() else None
+    try:
+        return read_bytes_within(state_root, "current.json")
+    except FileNotFoundError:
+        return None
 
 
 def current_pointer_sha256(state_root: Path) -> str | None:
     """Return the digest used by promotion and rollback CAS checks."""
-    payload = _current_bytes(Path(state_root))
+    payload = _current_bytes(resolve_within(state_root, "."))
     return _sha256(payload) if payload is not None else None
 
 
@@ -207,9 +183,9 @@ def _authority_bytes(snapshot_dir: Path, generation: str) -> tuple[bytes, int, i
 
 def build_root_migration_receipt(state_root: Path, new_root: Path) -> dict:
     """Build an exact, reviewable receipt without mutating either root or state."""
-    state_root = Path(state_root)
-    new_root = Path(new_root).resolve()
-    current_payload = resolve_within(state_root, "current.json").read_bytes()
+    state_root = resolve_within(state_root, ".")
+    new_root, state_root = validate_disjoint_roots(new_root, state_root)
+    current_payload = read_bytes_within(state_root, "current.json")
     current = json.loads(current_payload)
     old_root = Path(str(current.get("canonical_root", ""))).resolve()
     if old_root == new_root:
@@ -220,7 +196,7 @@ def build_root_migration_receipt(state_root: Path, new_root: Path) -> dict:
     new_entries: list[dict] = []
     for entry in discover_markdown(new_root):
         try:
-            payload = entry.absolute_path.read_bytes()
+            payload = read_bytes_within(new_root, entry.relative_path)
         except OSError as exc:
             raise RuntimeError("new canonical root is not fully readable") from exc
         new_entries.append({
@@ -257,7 +233,7 @@ def stage_refresh(
 ) -> RefreshResult:
     """Materialize and verify a candidate generation without changing current.json."""
     canonical_root = Path(canonical_root)
-    state_root = Path(state_root)
+    state_root = resolve_within(state_root, ".")
     wikimap_path = Path(wikimap_path)
     if not wikimap_path.is_file():
         raise FileNotFoundError("wikimap runtime not found")
@@ -276,12 +252,11 @@ def stage_refresh(
                 f"stale={stale}, quarantined={quarantined}, deleted={deleted}"
             )
         authority_payload, entry_count, unresolved = _authority_bytes(snapshot_dir, generation)
-        authority_path = snapshot_dir / "authority.json"
-        _write_fsync(authority_path, authority_payload)
+        write_bytes_atomic(snapshot_dir, "authority.json", authority_payload)
         WikimapAdapter(wikimap_path, snapshot_dir).index()
         index_path = snapshot_dir / ".wikimap" / "index.db"
         _quick_check_index(index_path)
-        index_payload = index_path.read_bytes()
+        index_payload = read_bytes_within(snapshot_dir, ".wikimap/index.db")
         prepared.update({
             "authority_entries": entry_count,
             "unresolved_redirects": unresolved,
@@ -291,14 +266,14 @@ def stage_refresh(
         descriptor = {
             "schema_version": 1,
             "generation": generation,
-            "manifest_sha256": _sha256((snapshot_dir / "manifest.json").read_bytes()),
+            "manifest_sha256": _sha256(read_bytes_within(snapshot_dir, "manifest.json")),
             "authority_sha256": prepared["authority_sha256"],
             "wikimap_index_sha256": prepared["wikimap_index_sha256"],
         }
         descriptor_payload = json.dumps(
             descriptor, indent=2, ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
-        _write_fsync(snapshot_dir / "candidate.json", descriptor_payload)
+        write_bytes_atomic(snapshot_dir, "candidate.json", descriptor_payload)
         prepared["candidate_sha256"] = _sha256(descriptor_payload)
         return {
             "authority_sha256": prepared["authority_sha256"],
@@ -313,7 +288,7 @@ def stage_refresh(
         promote=False,
         migration_receipt=migration_receipt,
     )
-    manifest_path = state_root / "snapshots" / snapshot.generation / "manifest.json"
+    manifest_relative = Path("snapshots") / snapshot.generation / "manifest.json"
     return RefreshResult(
         generation=snapshot.generation,
         summary=snapshot.summary,
@@ -321,7 +296,7 @@ def stage_refresh(
         unresolved_redirects=int(prepared["unresolved_redirects"]),
         authority_sha256=str(prepared["authority_sha256"]),
         wikimap_index_sha256=str(prepared["wikimap_index_sha256"]),
-        manifest_sha256=_sha256(manifest_path.read_bytes()),
+        manifest_sha256=_sha256(read_bytes_within(state_root, manifest_relative)),
         candidate_sha256=str(prepared["candidate_sha256"]),
         promoted=False,
         migration_receipt_sha256=snapshot.manifest.get("migration_receipt_sha256"),
@@ -492,10 +467,10 @@ def _verify_candidate(
     wikimap_path: Path | None = None,
 ) -> tuple[dict, bytes, bytes]:
     snapshot_dir = resolve_within(resolve_within(state_root, "snapshots"), generation)
-    manifest_payload = resolve_within(snapshot_dir, "manifest.json").read_bytes()
+    manifest_payload = read_bytes_within(snapshot_dir, "manifest.json")
     if _sha256(manifest_payload) != expected_manifest_sha256:
         raise RuntimeError("candidate manifest differs from expected digest")
-    descriptor_payload = resolve_within(snapshot_dir, "candidate.json").read_bytes()
+    descriptor_payload = read_bytes_within(snapshot_dir, "candidate.json")
     if _sha256(descriptor_payload) != expected_candidate_sha256:
         raise RuntimeError("candidate descriptor differs from expected digest")
     descriptor = json.loads(descriptor_payload)
@@ -517,7 +492,7 @@ def _verify_candidate(
     for entry in entries:
         relative = entry.get("relative_path")
         assert isinstance(relative, str)
-        payload = resolve_within(snapshot_dir, relative).read_bytes()
+        payload = read_bytes_within(snapshot_dir, relative)
         if len(payload) != entry.get("size") or _sha256(payload) != entry.get("sha256"):
             raise RuntimeError("candidate snapshot file integrity mismatch")
         usable.add(relative)
@@ -537,7 +512,7 @@ def _verify_candidate(
     if receipt is not None and receipt_sha != _canonical_json_sha256(receipt):
         raise RuntimeError("candidate migration receipt integrity check failed")
 
-    authority_payload = resolve_within(snapshot_dir, "authority.json").read_bytes()
+    authority_payload = read_bytes_within(snapshot_dir, "authority.json")
     if descriptor.get("authority_sha256") != _sha256(authority_payload):
         raise RuntimeError("candidate authority differs from staged digest")
     authority = json.loads(authority_payload)
@@ -546,7 +521,7 @@ def _verify_candidate(
     if authority.get("generation") != generation or authority.get("unresolved_redirects"):
         raise RuntimeError("candidate authority is not promotion-safe")
     index_path = resolve_within(snapshot_dir, ".wikimap/index.db")
-    index_payload = index_path.read_bytes()
+    index_payload = read_bytes_within(snapshot_dir, ".wikimap/index.db")
     if descriptor.get("wikimap_index_sha256") != _sha256(index_payload):
         raise RuntimeError("candidate Wikimap index differs from staged digest")
     _quick_check_index(index_path)
@@ -625,16 +600,18 @@ def _harden_generation_permissions(generation_dir: Path) -> None:
     owner can restore permissions. Integrity hashes still make such external
     mutation fail closed at verification or runtime readback.
     """
+    resolve_within(generation_dir.parent, generation_dir.name)
     directories = [generation_dir]
     for path in generation_dir.rglob("*"):
-        if path.is_file():
-            path.chmod(0o444)
-        elif path.is_dir():
+        resolve_within(generation_dir, path.relative_to(generation_dir))
+        if path.is_dir():
             directories.append(path)
-    for directory in sorted(
-        directories, key=lambda path: len(path.parts), reverse=True,
-    ):
-        directory.chmod(0o555)
+        else:
+            with os.fdopen(open_regular_within(generation_dir, path.relative_to(generation_dir)), "rb") as handle:
+                os.fchmod(handle.fileno(), 0o444)
+    for directory in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        with _directory_descriptor(generation_dir, directory.relative_to(generation_dir)) as descriptor:
+            os.fchmod(descriptor, 0o555)
 
 
 def promote_generation(
@@ -647,7 +624,7 @@ def promote_generation(
     wikimap_path: Path | None = None,
 ) -> RefreshResult:
     """CAS-promote an already verified generation under the shared writer lock."""
-    state_root = Path(state_root)
+    state_root = resolve_within(state_root, ".")
     with _writer_lock(state_root):
         current = _pointer_expectation(
             _current_bytes(state_root), expected_current_generation, expected_current_sha256,
@@ -713,7 +690,7 @@ def promote_generation(
         pointer_payload = json.dumps(
             pointer, indent=2, ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
-        _write_atomic(state_root / "current.json", pointer_payload)
+        write_bytes_atomic(state_root, "current.json", pointer_payload)
 
     authority = json.loads(authority_payload)
     return RefreshResult(
@@ -738,7 +715,7 @@ def refresh_wiki(
     migration_receipt: dict | None = None,
 ) -> RefreshResult:
     """Compatibility wrapper: stage, verify, then CAS-promote one generation."""
-    state_root = Path(state_root)
+    state_root = resolve_within(state_root, ".")
     current_payload = _current_bytes(state_root)
     expected_sha = _sha256(current_payload) if current_payload is not None else None
     expected_generation = (
@@ -768,7 +745,7 @@ def _verified_pointer_for_generation(
         raise RuntimeError("requested rollback generation is not the trusted previous generation")
     snapshots = resolve_within(state_root, "snapshots")
     snapshot_dir = resolve_within(snapshots, generation)
-    manifest_payload = resolve_within(snapshot_dir, "manifest.json").read_bytes()
+    manifest_payload = read_bytes_within(snapshot_dir, "manifest.json")
     manifest = json.loads(manifest_payload)
     if not isinstance(manifest, dict):
         raise RuntimeError("generation manifest is malformed")
@@ -797,9 +774,9 @@ def _verified_pointer_for_generation(
     for entry in entries:
         relative = entry.get("relative_path")
         assert isinstance(relative, str)
-        path = resolve_within(snapshot_dir, relative)
+        resolve_within(snapshot_dir, relative)
         if entry.get("state") in {"copied", "stale"}:
-            payload = path.read_bytes()
+            payload = read_bytes_within(snapshot_dir, relative)
             if len(payload) != entry.get("size") or _sha256(payload) != entry.get("sha256"):
                 raise RuntimeError("snapshot file integrity mismatch")
             usable.add(relative)
@@ -811,7 +788,7 @@ def _verified_pointer_for_generation(
     }
     if actual != usable:
         raise RuntimeError("snapshot Markdown inventory differs from generation manifest")
-    authority_payload = resolve_within(snapshot_dir, "authority.json").read_bytes()
+    authority_payload = read_bytes_within(snapshot_dir, "authority.json")
     if current.get("previous_authority_sha256") != _sha256(authority_payload):
         raise RuntimeError("previous generation authority is not integrity-bound")
     authority = json.loads(authority_payload)
@@ -820,7 +797,7 @@ def _verified_pointer_for_generation(
     if authority.get("generation") != generation or authority.get("unresolved_redirects"):
         raise RuntimeError("generation authority is not rollback-safe")
     index_path = resolve_within(snapshot_dir, ".wikimap/index.db")
-    index_payload = index_path.read_bytes()
+    index_payload = read_bytes_within(snapshot_dir, ".wikimap/index.db")
     if current.get("previous_wikimap_index_sha256") != _sha256(index_payload):
         raise RuntimeError("previous generation Wikimap index is not integrity-bound")
     _quick_check_index(index_path)
@@ -860,9 +837,9 @@ def rollback_generation(
     expected_current_sha256: str | None = None,
 ) -> RefreshResult:
     """Atomically repoint to a verified prior generation under CAS serialization."""
-    state_root = Path(state_root)
+    state_root = resolve_within(state_root, ".")
     with _writer_lock(state_root):
-        current_payload = resolve_within(state_root, "current.json").read_bytes()
+        current_payload = read_bytes_within(state_root, "current.json")
         if expected_current_sha256 is not None and _sha256(current_payload) != expected_current_sha256:
             raise RuntimeError("expected current pointer digest mismatch")
         current = json.loads(current_payload)
@@ -895,7 +872,7 @@ def rollback_generation(
         pointer_payload = json.dumps(
             pointer, indent=2, ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")
-        _write_atomic(state_root / "current.json", pointer_payload)
+        write_bytes_atomic(state_root, "current.json", pointer_payload)
 
     authority = json.loads(authority_payload)
     return RefreshResult(

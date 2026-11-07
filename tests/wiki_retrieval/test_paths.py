@@ -88,3 +88,45 @@ def test_retrieval_config_validates_without_creating_state(tmp_path: Path) -> No
     assert validated.canonical_root == canonical.resolve()
     assert validated.state_root == state.resolve()
     assert not state.exists()
+
+
+@pytest.mark.parametrize("relative", ["../escape", "/absolute", "nested/../../escape", "bad\x00name"])
+def test_boundary_descriptor_reader_rejects_malformed_paths(tmp_path, relative):
+    from local_wiki_librarian.paths import read_bytes_within
+    with pytest.raises((UnsafePathError, ValueError)):
+        read_bytes_within(tmp_path, relative)
+
+
+def test_boundary_descriptor_reader_handles_hidden_korean_file(tmp_path):
+    from local_wiki_librarian.paths import read_bytes_within, write_bytes_atomic
+    write_bytes_atomic(tmp_path, ".비밀/기록.md", "# 한글".encode())
+    assert read_bytes_within(tmp_path, ".비밀/기록.md") == "# 한글".encode()
+
+
+@pytest.mark.parametrize("component", ["leaf", "parent"])
+def test_boundary_descriptor_open_rejects_last_moment_symlink(tmp_path, monkeypatch, component):
+    import os
+    import local_wiki_librarian.paths as paths
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    (root / "nested").mkdir(parents=True)
+    outside.mkdir()
+    (root / "nested/page.md").write_bytes(b"SAFE")
+    (outside / "page.md").write_bytes(b"EXTERNAL")
+    original_open = os.open
+    swapped = False
+
+    def swap(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        expected = "page.md" if component == "leaf" else "nested"
+        if path == expected and dir_fd is not None and not swapped:
+            swapped = True
+            target = root / "nested/page.md" if component == "leaf" else root / "nested"
+            target.rename(target.with_name(target.name + ".saved"))
+            target.symlink_to(outside / "page.md" if component == "leaf" else outside)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(paths.os, "open", swap)
+    with pytest.raises(UnsafePathError):
+        paths.read_bytes_within(root, "nested/page.md")
+    assert swapped
+    assert (outside / "page.md").read_bytes() == b"EXTERNAL"
