@@ -3,3 +3,7 @@ local-wiki-librarian
 This project vendors Wikimap under src/local_wiki_librarian/_vendor/wikimap/.
 Wikimap is Copyright (c) 2026 Donghyun Ha and is distributed under its MIT
 license. See the bundled LICENSE and UPSTREAM.json for exact provenance.
+
+Local patches preserve empty effective-query results and bypass the literal
+FTS prefilter when existing query variants require the full section scan.
+The upstream commit remains the origin pin; UPSTREAM.json hashes the local bytes.

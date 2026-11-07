@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -32,8 +33,11 @@ def test_wikimap_provenance_is_exactly_pinned() -> None:
 
 def test_wikimap_vendor_hashes_and_notice_are_valid() -> None:
     result = verify_vendor(VENDOR_ROOT)
+    provenance = load_provenance(VENDOR_ROOT)
 
     assert result["verified_files"] == ["LICENSE", "wikimap.py"]
+    assert hashlib.sha256((VENDOR_ROOT / "wikimap.py").read_bytes()).hexdigest() == provenance["files"]["wikimap.py"]
+    assert hashlib.sha256((VENDOR_ROOT / "LICENSE").read_bytes()).hexdigest() == "e950a4da5722fea564dff1266790dd4d1415a6e70ee37baeb6147d0e9dc93e91"
     license_text = (VENDOR_ROOT / "LICENSE").read_text(encoding="utf-8")
     assert "Copyright (c) 2026 Donghyun Ha" in license_text
     assert "Permission is hereby granted" in license_text
@@ -46,25 +50,17 @@ def test_bundled_vendor_is_discoverable_and_verified() -> None:
     assert verify_vendor(root)["verified_files"] == ["LICENSE", "wikimap.py"]
 
 
-def test_wikimap_vendor_tampering_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tampered_file", ["wikimap.py", "LICENSE"])
+def test_wikimap_vendor_tampering_fails_closed(tmp_path: Path, tampered_file: str) -> None:
     root = tmp_path / "wikimap"
     root.mkdir()
-    provenance = {
-        "schema_version": 1,
-        "name": "wikimap",
-        "version": "1.0.0",
-        "repository": "https://github.com/dhha22/wikimap",
-        "commit": EXPECTED_COMMIT,
-        "license": "MIT",
-        "vendored_at": "2026-07-15",
-        "files": {
-            "wikimap.py": "0" * 64,
-            "LICENSE": "1" * 64,
-        },
-    }
+    provenance = load_provenance(VENDOR_ROOT)
     (root / "UPSTREAM.json").write_text(json.dumps(provenance), encoding="utf-8")
-    (root / "wikimap.py").write_text("print('tampered')\n", encoding="utf-8")
-    (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    for filename in provenance["files"]:
+        (root / filename).write_bytes((VENDOR_ROOT / filename).read_bytes())
+    verify_vendor(root)
+    target = root / tampered_file
+    target.write_bytes(target.read_bytes() + b"\n# tampered\n")
 
-    with pytest.raises(VendorVerificationError, match="checksum mismatch"):
+    with pytest.raises(VendorVerificationError, match=f"checksum mismatch for {tampered_file}"):
         verify_vendor(root)

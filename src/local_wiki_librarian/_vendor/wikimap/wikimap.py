@@ -2024,9 +2024,13 @@ def cmd_search(root, db, args):
         # as a rare literal it scores a deceptively high idf and can dominate the
         # coverage gate. Drop it — field-qualified terms are kept regardless.
         terms = [(f, t) for f, t in terms if f is not None or len(t) >= 2]
+        if not terms:
+            return {"query": query, "results": [], "partial": False, "weak": True,
+                    "plain": [], "pvariants": {}, "df": {}}
         plain = [t for f, t in terms if f is None]
+        pvariants = {t: term_variants(t) for t in plain}
         idf, total_idf, df, doc_hits = query_idf(db, plain, doc_hays())
-        hitvs = {t: minimal_variants(term_variants(t)) for t in plain}
+        hitvs = {t: minimal_variants(pvariants[t]) for t in plain}
         # haystacks don't carry aliases, so an alias-only match must be added to
         # the prefilter or collect() would never see it
         for path, al in doc_aliases.items():
@@ -2037,7 +2041,9 @@ def cmd_search(root, db, args):
         # term is impossible, so long queries skip the AND pre-filter and go
         # straight to an idf-gated OR over a full scan. Short queries keep strict AND.
         long_query = len(plain) >= LONG_QUERY
-        fts_terms = [] if long_query else [t for f, t in terms if f in (None, "heading")]
+        # Literal FTS cannot exclude documents matched by a shorter variant.
+        variant_query = any(vs != {t} for t, vs in pvariants.items())
+        fts_terms = [] if long_query or variant_query else [t for f, t in terms if f in (None, "heading")]
         paths = candidate_paths(db, fts_terms, titles, doc_aliases) if fts_terms else None
         if paths is None:
             rows = all_sections()
@@ -2053,7 +2059,6 @@ def cmd_search(root, db, args):
                     % ",".join("?" * len(chunk)),
                     chunk,
                 ).fetchall()
-        pvariants = {t: term_variants(t) for f, t in terms if f is None}
         results = collect(rows, not long_query, terms, plain, idf, total_idf, long_query, pvariants, doc_hits, hitvs)
         partial = long_query
         if not results and not long_query and len(plain) >= 2:
