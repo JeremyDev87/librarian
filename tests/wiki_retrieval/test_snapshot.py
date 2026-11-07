@@ -604,3 +604,66 @@ def test_boundary_ordinary_read_failure_retries_then_quarantines_or_stales(tmp_p
     copied = state / "snapshots" / result.generation / "page.md"
     assert copied.read_bytes() == b"# ORIGINAL" if prior else not copied.exists()
     assert _source_state(wiki) == source_before
+
+
+@pytest.mark.parametrize("scenario", ["initial", "existing", "discovery", "open", "receipt"])
+def test_boundary_nonregular_socket_is_not_quarantined_or_stale(monkeypatch, scenario):
+    import socket
+    import tempfile
+    import local_wiki_librarian.paths as paths
+    import local_wiki_librarian.snapshot as snapshot
+    from local_wiki_librarian.refresh import build_root_migration_receipt
+
+    # Short fixture paths stay below macOS's AF_UNIX sockaddr pathname limit.
+    with tempfile.TemporaryDirectory(prefix="s5-") as temporary, socket.socket(socket.AF_UNIX) as endpoint:
+        base = Path(temporary).resolve()
+        wiki, state = base / "wiki", base / "state"
+        _make_wiki(wiki, {"good.md": "# Good", "socket.md": "# Regular before replacement"})
+        if scenario != "initial":
+            build_snapshot(wiki, state)
+        before = (state / "current.json").read_bytes() if scenario != "initial" else None
+        source_after_injection = []
+
+        def replace_with_socket():
+            (wiki / "socket.md").unlink()
+            endpoint.bind(str(wiki / "socket.md"))
+            source_after_injection.extend(_source_state(wiki))
+
+        if scenario == "discovery":
+            original_discover = snapshot.discover_markdown
+
+            def discover(root):
+                entries = original_discover(root)
+                replace_with_socket()
+                return entries
+
+            monkeypatch.setattr(snapshot, "discover_markdown", discover)
+        elif scenario == "open":
+            original_open = paths.os.open
+
+            def open_after_replacement(path, flags, mode=0o777, *, dir_fd=None):
+                if path == "socket.md" and dir_fd is not None and not source_after_injection:
+                    replace_with_socket()
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            monkeypatch.setattr(paths.os, "open", open_after_replacement)
+        else:
+            replace_with_socket()
+
+        if scenario == "receipt":
+            old = base / "old"
+            _make_wiki(old, {"old.md": "# Old"})
+            old_state = base / "old-state"
+            build_snapshot(old, old_state)
+            old_current = (old_state / "current.json").read_bytes()
+            with pytest.raises(paths.UnsafePathError, match="not a regular file"):
+                build_root_migration_receipt(old_state, wiki)
+            assert (old_state / "current.json").read_bytes() == old_current
+        else:
+            with pytest.raises(SnapshotError, match="not a regular file"):
+                build_snapshot(wiki, state)
+        assert source_after_injection and _source_state(wiki) == source_after_injection
+        if before is None:
+            assert not (state / "current.json").exists()
+        else:
+            assert (state / "current.json").read_bytes() == before

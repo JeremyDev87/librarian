@@ -154,6 +154,12 @@ def open_regular_within(root: PathLike, relative: PathLike, flags: int = os.O_RD
         except OSError as exc:
             if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                 raise UnsafePathError(f"unsafe file: {relative}") from exc
+            try:
+                mode = os.stat(path.name, dir_fd=parent, follow_symlinks=False).st_mode
+            except OSError:
+                raise exc
+            if not stat.S_ISREG(mode):
+                raise UnsafePathError(f"not a regular file: {relative}") from exc
             raise
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
