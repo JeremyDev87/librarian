@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sys
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +21,9 @@ from local_wiki_librarian.authority import (  # noqa: E402
     AuthorityManifest,
     compile_authority,
 )
-from local_wiki_librarian.lexical import WikimapAdapter  # noqa: E402
+from local_wiki_librarian.lexical import SearchResult, WikimapAdapter, WikimapAdapterError  # noqa: E402
+from local_wiki_librarian.scorer import aggregate_reports, score_query  # noqa: E402
+from local_wiki_librarian.soak import validate_query_result  # noqa: E402
 
 WIKIMAP_PATH = ROOT / "src" / "local_wiki_librarian" / "_vendor" / "wikimap" / "wikimap.py"
 
@@ -316,3 +320,176 @@ class TestRouterConfig:
         results = router.search("policy")
         # Without graph expansion, all results should be from wikimap
         assert all(r.source == "wikimap" for r in results)
+
+
+@pytest.mark.parametrize(
+    'corpus_size,eligible_count,returned_count,duplicates,filter_enabled,expected_calls',
+    [
+        (450, 5, 450, False, True, [100]),
+        (450, 0, 99, False, True, [100]),
+        (450, 0, 199, False, True, [100, 200]),
+        (450, 0, 450, False, True, [100, 200, 400, 450]),
+        (150, 0, 150, True, True, [100, 150]),
+        (50, 0, 50, False, True, [100]),
+        (450, 0, 450, False, False, [100]),
+    ],
+)
+def test_candidate_refill_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int, eligible_count: int, returned_count: int,
+    duplicates: bool, filter_enabled: bool, expected_calls: list[int],
+) -> None:
+    entries = [
+        AuthorityEntry(relative_path=f'{index}.md', tier='current' if index < eligible_count else 'raw')
+        for index in range(corpus_size)
+    ]
+    hits = [SearchResult(entry.relative_path, 1, 'Policy', 10.0) for entry in entries[:returned_count]]
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    calls = []
+
+    def search(query: str, n: int = 10) -> list[SearchResult]:
+        calls.append(n)
+        assert len(calls) <= 4, 'candidate refill failed to terminate'
+        return hits[:n]
+
+    monkeypatch.setattr(adapter, 'search', search)
+    router = WikiRouter(
+        adapter, _make_authority(entries * (2 if duplicates else 1)),
+        RouterConfig(k=5, graph_expand=False, authority_filter=filter_enabled),
+    )
+    results = router.search('policy')
+
+    assert calls == expected_calls
+    assert [item.path for item in results] == [
+        f'{index}.md' for index in range(eligible_count if filter_enabled else 5)
+    ]
+    assert all(item.score == (10.0 if filter_enabled else 1.0) for item in results)
+
+
+def test_candidate_refill_redirect_dedup_latest_prefix_and_graph_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = [
+        AuthorityEntry(relative_path=f'alias-{index}.md', tier='redirect', canonical_path='current')
+        for index in range(100)
+    ] + [AuthorityEntry(relative_path='current.md', tier='current')]
+    entries += [AuthorityEntry(relative_path=f'next-{index}.md', tier='authority') for index in range(4)]
+    entries += [AuthorityEntry(relative_path=f'raw-{index}.md', tier='raw') for index in range(300)]
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    calls = []
+
+    def search(query: str, n: int = 10) -> list[SearchResult]:
+        calls.append(n)
+        hits = [SearchResult(entry.relative_path, 1, str(n), float(n)) for entry in entries]
+        return hits[:n]
+
+    monkeypatch.setattr(adapter, 'search', search)
+    router = WikiRouter(adapter, _make_authority(entries), RouterConfig(k=5))
+    graph_calls = []
+
+    def links(path: str) -> dict[str, list]:
+        graph_calls.append((path, list(calls)))
+        return {'outlinks': [], 'backlinks': []}
+
+    monkeypatch.setattr(router.graph, 'links', links)
+    results = router.search('policy')
+
+    assert calls == [100, 200]
+    assert [item.path for item in results] == ['current.md'] + [f'next-{index}.md' for index in range(4)]
+    assert all(item.score == 200.0 and item.title == '200' for item in results)
+    assert results[0].redirected_from == 'alias-0.md'
+    assert graph_calls == [(path, [100, 200]) for path in ['current.md', 'next-0.md', 'next-1.md']]
+
+
+@pytest.mark.parametrize('outcome', ['weak_dead', 'adapter_error'])
+def test_candidate_refill_preserves_policy_on_later_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    entries = [AuthorityEntry(relative_path=f'{index}.md', tier='raw') for index in range(100)]
+    entries.append(AuthorityEntry(relative_path='current.md', tier='current'))
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    calls = []
+
+    def search(query: str, n: int = 10) -> list[SearchResult]:
+        calls.append(n)
+        if len(calls) == 2:
+            if outcome == 'adapter_error':
+                raise WikimapAdapterError('refill failed')
+            adapter.last_weak = True
+            adapter.last_terms = [{'term': 'absent', 'df': 0}]
+        return [SearchResult(entry.relative_path, 1, 'Policy', 10.0) for entry in entries[:n]]
+
+    monkeypatch.setattr(adapter, 'search', search)
+    router = WikiRouter(adapter, _make_authority(entries), RouterConfig(k=5, graph_expand=False))
+    if outcome == 'adapter_error':
+        with pytest.raises(WikimapAdapterError, match='refill failed'):
+            router.search('policy absent')
+    else:
+        assert router.search('policy absent') == []
+        assert len(router.last_warnings) == 1
+    assert calls == [100, 101]
+
+
+@pytest.mark.parametrize('raw_count', [199, 200])
+@pytest.mark.parametrize('k', [10, 11])
+def test_candidate_refill_actual_vendor_crowding(tmp_path: Path, raw_count: int, k: int) -> None:
+    (tmp_path / 'raw').mkdir()
+    for index in range(raw_count):
+        (tmp_path / f'raw/backup-{index}.md').write_text('# Backup\nbackup backup backup\n', encoding='utf-8')
+    (tmp_path / 'current.md').write_text('---\nauthority: high\nstatus: active\n---\n# Operations\nbackup\n', encoding='utf-8')
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    adapter.index()
+    authority = compile_authority(tmp_path, 'test')
+    router = WikiRouter(adapter, authority, RouterConfig(k=k, graph_expand=False))
+
+    results = router.search('backup')
+
+    assert [item.path for item in results] == ['current.md']
+    assert all(item.tier == 'current' for item in results)
+
+
+def test_candidate_refill_synthetic_contract_table(tmp_path: Path) -> None:
+    (tmp_path / 'raw').mkdir()
+    for index in range(200):
+        (tmp_path / f'raw/backup-{index}.md').write_text('# Backup\nbackup backup backup\n', encoding='utf-8')
+    (tmp_path / 'current.md').write_text('---\nauthority: high\nstatus: active\n---\n# Operations\nbackup\n', encoding='utf-8')
+    (tmp_path / 'park.md').write_text('---\nauthority: high\nstatus: active\n---\n# Park\n공원\n', encoding='utf-8')
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    adapter.index()
+    authority = compile_authority(tmp_path, 'test')
+    router = WikiRouter(adapter, authority, RouterConfig(k=5, graph_expand=False))
+    cases = [
+        {'query': 'Operations', 'expected_paths': ['current.md']},
+        {'query': '공원에서', 'expected_paths': ['park.md']},
+        {'query': 'title:Operations', 'expected_paths': ['current.md']},
+        {'query': 'backup', 'expected_paths': ['current.md']},
+        {'query': '공원 nonexistent', 'expected_no_answer': True},
+        {'query': '공원 산책을 알려주세요', 'expected_no_answer': True},
+        {'query': 'unknown-vocabulary', 'expected_no_answer': True},
+        {'query': '?', 'expected_no_answer': True},
+    ]
+    reports = []
+    for case in cases:
+        paths = [item.path for item in router.search(case['query'])]
+        validate_query_result(case, paths)
+        reports.append(score_query(
+            case['query'], case.get('expected_paths', []), paths,
+            [entry.relative_path for entry in authority.entries if entry.tier == 'raw'],
+            k=5, expected_no_answer=case.get('expected_no_answer', False),
+        ))
+    report = aggregate_reports('synthetic-router', reports)
+
+    assert report.query_count == len(cases)
+    assert report.avg_recall_at_k == report.avg_mrr == report.top1_accuracy == 1.0
+    assert report.authority_false_positive_count == 0
+
+
+@pytest.mark.parametrize('query', ['', 'type:unknown'])
+def test_candidate_refill_actual_vendor_errors(tmp_path: Path, query: str) -> None:
+    _make_mini_wiki(tmp_path)
+    adapter = WikimapAdapter(WIKIMAP_PATH, tmp_path)
+    adapter.index()
+    router = WikiRouter(adapter, compile_authority(tmp_path, 'test'))
+
+    with pytest.raises(WikimapAdapterError):
+        router.search(query)

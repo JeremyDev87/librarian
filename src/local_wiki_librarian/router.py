@@ -133,46 +133,57 @@ class WikiRouter:
         self.last_warnings = []
 
         # 1. Lexical search via wikimap
-        raw_results = self.adapter.search(
-            query,
-            n=max(100, self.config.k * 20),
-        )
-        dead_terms = [
-            str(item.get("term", ""))
-            for item in getattr(self.adapter, "last_terms", [])
-            if item.get("df") == 0
-        ]
-        if getattr(self.adapter, "last_weak", False) and dead_terms:
-            self.last_warnings.append("weak lexical query contains dead vocabulary; returning no answer")
-            return []
+        candidate_limit = max(100, self.config.k * 20)
+        candidate_cap = max(candidate_limit, len(self._tier_map))
+        while True:
+            raw_results = self.adapter.search(
+                query,
+                n=candidate_limit,
+            )
+            dead_terms = [
+                str(item.get("term", ""))
+                for item in getattr(self.adapter, "last_terms", [])
+                if item.get("df") == 0
+            ]
+            if getattr(self.adapter, "last_weak", False) and dead_terms:
+                self.last_warnings.append("weak lexical query contains dead vocabulary; returning no answer")
+                return []
 
-        results: list[RouterResult] = []
-        seen_paths: set[str] = set()
+            results: list[RouterResult] = []
+            seen_paths: set[str] = set()
 
-        for r in raw_results:
-            resolved_path, redirected_from = self._resolve_redirect(r.file)
-            if resolved_path in seen_paths:
-                continue
-            seen_paths.add(resolved_path)
+            for r in raw_results:
+                resolved_path, redirected_from = self._resolve_redirect(r.file)
+                if resolved_path in seen_paths:
+                    continue
+                seen_paths.add(resolved_path)
 
-            tier = self._tier_map.get(resolved_path, "unknown")
-            if self.config.authority_filter and (
-                tier not in {"current", "authority"}
-                or self._do_not_answer_map.get(resolved_path, False)
+                tier = self._tier_map.get(resolved_path, "unknown")
+                if self.config.authority_filter and (
+                    tier not in {"current", "authority"}
+                    or self._do_not_answer_map.get(resolved_path, False)
+                ):
+                    continue
+                adjusted_score = self._demote_score(resolved_path, r.score)
+
+                results.append(RouterResult(
+                    path=resolved_path,
+                    score=adjusted_score,
+                    tier=tier,
+                    title=r.title,
+                    snippet=r.snippet,
+                    source="redirect" if redirected_from else "wikimap",
+                    redirected_from=redirected_from,
+                ))
+
+            if (
+                not self.config.authority_filter
+                or len(results) >= self.config.k
+                or len(raw_results) < candidate_limit
+                or candidate_limit >= candidate_cap
             ):
-                continue
-            adjusted_score = self._demote_score(resolved_path, r.score)
-
-            results.append(RouterResult(
-                path=resolved_path,
-                score=adjusted_score,
-                tier=tier,
-                title=r.title,
-                snippet=r.snippet,
-                source="redirect" if redirected_from else "wikimap",
-                redirected_from=redirected_from,
-            ))
-
+                break
+            candidate_limit = min(candidate_limit * 2, candidate_cap)
 
         # 2. Graph expansion (optional, bounded to at most two hops)
         if self.config.graph_expand and self.config.graph_depth > 0 and results:
