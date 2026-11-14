@@ -9,6 +9,7 @@ From the repository root, use Python 3.9 or newer on Linux or macOS:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e '.[test]'
 REPORT_DIR="$(mktemp -d)"
 python scripts/evaluate-wiki-retrieval.py \
