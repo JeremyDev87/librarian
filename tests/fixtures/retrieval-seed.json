@@ -1,0 +1,367 @@
+{
+  "schema_version": 1,
+  "corpus_id": "librarian-public-seed-v1",
+  "source_revision": "333db2117bc1f6507dd81f31086999c7de5775af",
+  "provenance": [
+    {
+      "document_path": "current/platform.md",
+      "source_path": "README.md",
+      "section": "Platform support",
+      "source_sha256": "d637fba8dde846199640d52aee00d75b763f40b4a1bb3b11e96574151031c858",
+      "kind": "public-derived",
+      "description": "공개 문서의 한국어 구성 번역. 실제 사용자 자료나 운영 권한을 나타내지 않음."
+    },
+    {
+      "document_path": "current/snapshot.md",
+      "source_path": "docs/architecture.md",
+      "section": "Architecture diagram; Safety model",
+      "source_sha256": "012391754eda12c16d62ea6d1564f6444a810bc38c8ee65f121e3ea3a3ca4ec6",
+      "kind": "public-derived",
+      "description": "공개 문서의 한국어 구성 번역. 실제 사용자 자료나 운영 권한을 나타내지 않음."
+    },
+    {
+      "document_path": "current/snapshot.md",
+      "source_path": "README.md",
+      "section": "Features: read-only snapshotting with generation and SHA-256 tracking",
+      "source_sha256": "d637fba8dde846199640d52aee00d75b763f40b4a1bb3b11e96574151031c858",
+      "kind": "public-derived",
+      "description": "세대 및 SHA-256 기록의 직접 근거."
+    },
+    {
+      "document_path": "current/authority.md",
+      "source_path": "README.md",
+      "section": "Authority contract",
+      "source_sha256": "d637fba8dde846199640d52aee00d75b763f40b4a1bb3b11e96574151031c858",
+      "kind": "public-derived",
+      "description": "공개 문서의 한국어 구성 번역. 실제 사용자 자료나 운영 권한을 나타내지 않음."
+    },
+    {
+      "document_path": "current/package.md",
+      "source_path": "docs/architecture.md",
+      "section": "Package boundary",
+      "source_sha256": "012391754eda12c16d62ea6d1564f6444a810bc38c8ee65f121e3ea3a3ca4ec6",
+      "kind": "public-derived",
+      "description": "공개 문서의 한국어 구성 번역. 실제 사용자 자료나 운영 권한을 나타내지 않음."
+    },
+    {
+      "document_path": "current/package.md",
+      "source_path": "README.md",
+      "section": "Install from source: distribution name and import namespace",
+      "source_sha256": "d637fba8dde846199640d52aee00d75b763f40b4a1bb3b11e96574151031c858",
+      "kind": "public-derived",
+      "description": "배포 패키지 이름 local-wiki-librarian의 직접 근거."
+    },
+    {
+      "document_path": "raw/platform-draft.md",
+      "source_path": "README.md",
+      "section": "Platform support; Authority contract",
+      "source_sha256": "d637fba8dde846199640d52aee00d75b763f40b4a1bb3b11e96574151031c858",
+      "kind": "synthetic",
+      "description": "합성 raw 음성 대조군. Python 2.7/Windows 주장은 Platform support의 반대이며 실제 사실이 아님."
+    },
+    {
+      "document_path": "current/blocked.md",
+      "source_path": "src/local_wiki_librarian/frontmatter.py",
+      "section": "ParsedFrontmatter.is_redirect; is_authoritative; is_current_truth",
+      "source_sha256": "62b9f78ab6b91d43bdf51089ede85a910ec11572aeff685a5f0f7dd81df5ca1b",
+      "kind": "synthetic",
+      "description": "합성 차단 대조군. high/active라도 do_not_answer_as_current=true이므로 현재 정답으로 부적격."
+    }
+  ],
+  "documents": [
+    {
+      "path": "current/platform.md",
+      "content": "---\ntitle: Python 버전\nauthority: high\nstatus: active\nfixture_kind: public-derived\n---\n# Python 버전\n\nPython 3.9 이상을 지원합니다. Linux와 macOS에서 실행하며 POSIX 파일 잠금이 필요합니다. Windows는 현재 지원하지 않습니다.\n\n이 문서는 공개 저장소 문서를 한국어로 재서술한 구성 번역 seed입니다. 실제 사용자 자료가 아니며 권한 metadata는 평가용입니다.\n"
+    },
+    {
+      "path": "current/snapshot.md",
+      "content": "---\ntitle: Markdown 스냅샷\nauthority: high\nstatus: active\nfixture_kind: public-derived\n---\n# Markdown 스냅샷\n\nMarkdown 원본은 읽기 전용으로 취급합니다. 검증한 Markdown 파일을 스냅샷으로 복사하고 세대와 SHA-256 해시를 기록합니다. 스냅샷 승격은 원자적으로 이루어지며 오래되거나 격리되거나 삭제되거나 읽을 수 없는 입력에서는 실패 처리합니다.\n\n이 문서는 공개 저장소 문서를 한국어로 재서술한 구성 번역 seed입니다. 실제 사용자 자료가 아니며 권한 metadata는 평가용입니다.\n"
+    },
+    {
+      "path": "current/authority.md",
+      "content": "---\ntitle: authority current\nauthority: high\nstatus: active\nfixture_kind: public-derived\n---\n# authority current\n\nauthority: high와 status: active가 함께 명시된 문서만 current 자격을 갖습니다. 제목, 파일명, 디렉터리 또는 source_role은 권한을 부여하지 않습니다. raw와 history 등은 별도 분류되며 명시적인 current 사실보다 우선할 수 없습니다.\n\n이 문서는 공개 저장소 문서를 한국어로 재서술한 구성 번역 seed입니다. 실제 사용자 자료가 아니며 권한 metadata는 평가용입니다.\n"
+    },
+    {
+      "path": "current/package.md",
+      "content": "---\ntitle: 패키지 이름\nauthority: high\nstatus: active\nfixture_kind: public-derived\n---\n# 패키지 이름\n\n배포 패키지 이름은 local-wiki-librarian이고 Python import namespace는 local_wiki_librarian입니다. Wikimap과 MIT 라이선스 및 출처 정보는 _vendor/wikimap에, Librarian Packet 스키마는 schemas에 패키지 데이터로 포함됩니다. 설치된 wheel은 소스 checkout 배치에 의존하지 않습니다.\n\n이 문서는 공개 저장소 문서를 한국어로 재서술한 구성 번역 seed입니다. 실제 사용자 자료가 아니며 권한 metadata는 평가용입니다.\n"
+    },
+    {
+      "path": "raw/platform-draft.md",
+      "content": "---\ntitle: Python 플랫폼 미검증 초안\nauthority: low\nstatus: draft\nfixture_kind: synthetic\n---\n# Python 플랫폼 미검증 초안\n\n합성 adversarial 음성 대조군입니다. 다음 주장은 의도적으로 공개 근거에 반하는 미검증 문구이며 정답이 아닙니다: Python 2.7만 지원하며 Windows 전용입니다.\n"
+    },
+    {
+      "path": "current/blocked.md",
+      "content": "---\ntitle: 차단된 패키지 기록\nauthority: high\nstatus: active\ndo_not_answer_as_current: true\nfixture_kind: synthetic\n---\n# 차단된 패키지 기록\n\n합성 adversarial 음성 대조군입니다. Python 버전, Markdown 스냅샷, authority current, 패키지 이름과 관련된 검색 후보가 될 수 있지만 do_not_answer_as_current 설정으로 현재 정답에 사용하면 안 됩니다. 실제 사용자 문서가 아닙니다.\n"
+    }
+  ],
+  "queries": [
+    {
+      "id": "platform-01",
+      "family": "platform",
+      "split": "dev",
+      "query": "Python",
+      "expected_paths": [
+        "current/platform.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/platform.md / Python 버전: Python 3.9 이상, Linux/macOS 및 POSIX 잠금 지원.",
+      "variants": []
+    },
+    {
+      "id": "platform-02",
+      "family": "platform",
+      "split": "dev",
+      "query": "Python 버전",
+      "expected_paths": [
+        "current/platform.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/platform.md / Python 버전: Python 3.9 이상, Linux/macOS 및 POSIX 잠금 지원.",
+      "variants": []
+    },
+    {
+      "id": "platform-03",
+      "family": "platform",
+      "split": "dev",
+      "query": "Python 버전을 알려주세요",
+      "expected_paths": [
+        "current/platform.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/platform.md / Python 버전: Python 3.9 이상, Linux/macOS 및 POSIX 잠금 지원.",
+      "variants": [
+        "Python 버전"
+      ]
+    },
+    {
+      "id": "snapshot-01",
+      "family": "snapshot",
+      "split": "frozen_check",
+      "query": "스냅샷",
+      "expected_paths": [
+        "current/snapshot.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/snapshot.md / Markdown 스냅샷: 읽기 전용 원본에서 검증 파일 복사, 세대와 SHA-256 기록 및 원자적 승격.",
+      "variants": []
+    },
+    {
+      "id": "snapshot-02",
+      "family": "snapshot",
+      "split": "frozen_check",
+      "query": "Markdown 스냅샷",
+      "expected_paths": [
+        "current/snapshot.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/snapshot.md / Markdown 스냅샷: 읽기 전용 원본에서 검증 파일 복사, 세대와 SHA-256 기록 및 원자적 승격.",
+      "variants": []
+    },
+    {
+      "id": "snapshot-03",
+      "family": "snapshot",
+      "split": "frozen_check",
+      "query": "Markdown 스냅샷을 알려주세요",
+      "expected_paths": [
+        "current/snapshot.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/snapshot.md / Markdown 스냅샷: 읽기 전용 원본에서 검증 파일 복사, 세대와 SHA-256 기록 및 원자적 승격.",
+      "variants": [
+        "Markdown 스냅샷"
+      ]
+    },
+    {
+      "id": "authority-01",
+      "family": "authority",
+      "split": "frozen_check",
+      "query": "authority",
+      "expected_paths": [
+        "current/authority.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/authority.md / authority current: authority high와 status active의 명시적 결합이 current 자격의 근거.",
+      "variants": []
+    },
+    {
+      "id": "authority-02",
+      "family": "authority",
+      "split": "frozen_check",
+      "query": "authority current",
+      "expected_paths": [
+        "current/authority.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/authority.md / authority current: authority high와 status active의 명시적 결합이 current 자격의 근거.",
+      "variants": []
+    },
+    {
+      "id": "authority-03",
+      "family": "authority",
+      "split": "frozen_check",
+      "query": "authority current 알려주세요",
+      "expected_paths": [
+        "current/authority.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/authority.md / authority current: authority high와 status active의 명시적 결합이 current 자격의 근거.",
+      "variants": [
+        "authority current"
+      ]
+    },
+    {
+      "id": "package-01",
+      "family": "package",
+      "split": "dev",
+      "query": "local-wiki-librarian",
+      "expected_paths": [
+        "current/package.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/package.md / 패키지 이름: 배포 이름 local-wiki-librarian과 import namespace local_wiki_librarian.",
+      "variants": []
+    },
+    {
+      "id": "package-02",
+      "family": "package",
+      "split": "dev",
+      "query": "패키지 이름",
+      "expected_paths": [
+        "current/package.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/package.md / 패키지 이름: 배포 이름 local-wiki-librarian과 import namespace local_wiki_librarian.",
+      "variants": []
+    },
+    {
+      "id": "package-03",
+      "family": "package",
+      "split": "dev",
+      "query": "패키지 이름을 알려주세요",
+      "expected_paths": [
+        "current/package.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/package.md / 패키지 이름: 배포 이름 local-wiki-librarian과 import namespace local_wiki_librarian.",
+      "variants": [
+        "패키지 이름"
+      ]
+    },
+    {
+      "id": "ood-01",
+      "family": "ood",
+      "split": "frozen_check",
+      "query": "바나나 가격",
+      "expected_no_answer": true,
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "여섯 문서 어디에도 바나나 가격 정보가 없다. 공개 사실은 플랫폼/스냅샷/권한/패키지에 한정된다.",
+      "variants": []
+    },
+    {
+      "id": "ood-02",
+      "family": "ood",
+      "split": "frozen_check",
+      "query": "우주선 연료",
+      "expected_no_answer": true,
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "여섯 문서 어디에도 우주선 연료 정보가 없다.",
+      "variants": []
+    },
+    {
+      "id": "ood-03",
+      "family": "ood",
+      "split": "frozen_check",
+      "query": "Python nonexistent",
+      "expected_no_answer": true,
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "Python 정보는 존재하지만 nonexistent 조건을 충족하는 근거는 corpus에 없다. 부분 단어 적중만으로 답하지 않는 합성 무응답 대조군이다.",
+      "variants": []
+    },
+    {
+      "id": "syntax-01",
+      "family": "syntax",
+      "split": "dev",
+      "query": "?",
+      "expected_no_answer": true,
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "구두점만으로는 corpus에서 답할 사실 질문이나 검색 용어를 특정할 수 없다.",
+      "variants": []
+    },
+    {
+      "id": "syntax-02",
+      "family": "syntax",
+      "split": "dev",
+      "query": "가",
+      "expected_no_answer": true,
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "고립된 한 글자는 corpus의 어느 사실도 특정하지 않는다. 단일 글자 구문 무응답 대조군이다.",
+      "variants": []
+    },
+    {
+      "id": "syntax-03",
+      "family": "syntax",
+      "split": "dev",
+      "query": "title:패키지",
+      "expected_paths": [
+        "current/package.md"
+      ],
+      "should_not_return": [
+        "raw/platform-draft.md",
+        "current/blocked.md"
+      ],
+      "label_basis": "current/package.md의 제목 패키지 이름을 명시적으로 요청하는 title 구문이다.",
+      "variants": []
+    }
+  ]
+}
