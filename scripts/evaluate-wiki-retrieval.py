@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure constructed inline corpora without changing the retrieval policy."""
+"""Measure inline corpora without changing the retrieval policy."""
 from __future__ import annotations
 
 import argparse
@@ -45,7 +45,9 @@ def validate_corpus(data) -> dict:
     required = {"schema_version", "corpus_id", "source_revision", "provenance", "documents", "queries"}
     if not isinstance(data, dict) or set(data) != required or type(data["schema_version"]) is not int or data["schema_version"] != 1:
         raise ValueError("corpus_schema")
-    if data["corpus_id"] != "librarian-public-seed-v1" or not isinstance(data["source_revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", data["source_revision"]):
+    owner_local = data["corpus_id"] == "librarian-owner-local-v1"
+    revision_pattern = r"[0-9a-f]{64}" if owner_local else r"[0-9a-f]{40}"
+    if data["corpus_id"] not in ("librarian-public-seed-v1", "librarian-owner-local-v1") or not isinstance(data["source_revision"], str) or not re.fullmatch(revision_pattern, data["source_revision"]):
         raise ValueError("corpus_identity")
     if any(not isinstance(data[key], list) or not data[key] for key in ("documents", "queries", "provenance")):
         raise ValueError("empty_collection")
@@ -62,12 +64,18 @@ def validate_corpus(data) -> dict:
                 raise ValueError("duplicate_document")
             aliases[alias] = (prefix, is_file)
         paths.add(doc["path"])
+    local_hashes = {doc["path"]: digest(doc["content"].encode("utf-8")) for doc in data["documents"]} if owner_local else {}
+    provenance_kinds = {"owner-provided"} if owner_local else {"synthetic", "public-derived"}
     provenance_paths = set()
     for item in data["provenance"]:
         if not isinstance(item, dict) or set(item) != {"document_path", "source_path", "section", "source_sha256", "kind", "description"} or not all(isinstance(value, str) and value.strip() for value in item.values()):
             raise ValueError("provenance_schema")
-        if item["document_path"] not in paths or not relative_path(item["source_path"]) or item["kind"] not in {"synthetic", "public-derived"} or not re.fullmatch(r"[0-9a-f]{64}", item["source_sha256"]):
+        if item["document_path"] not in paths or not relative_path(item["source_path"]) or item["kind"] not in provenance_kinds or not re.fullmatch(r"[0-9a-f]{64}", item["source_sha256"]):
             raise ValueError("provenance_contract")
+        if owner_local and (item["document_path"] in provenance_paths or item["source_path"] != item["document_path"]
+                            or item["source_sha256"] != local_hashes[item["document_path"]]
+                            or item["section"] != "whole-document" or item["description"] != "owner-approved local snapshot"):
+            raise ValueError("local_provenance_contract")
         provenance_paths.add(item["document_path"])
     if provenance_paths != paths:
         raise ValueError("provenance_coverage")
@@ -225,7 +233,9 @@ def run(corpus: dict) -> dict:
                               "warmups": 1, "repetitions": 5, "clock": "perf_counter_ns", "scope": "router.search only",
                               "p95_method": "nearest-rank; five-sample observed maximum; not population latency or SLA",
                               "mrr_definition": "existing scorer: reciprocal first relevant rank; correct abstention = 1",
-                              "corpus_scope": "constructed public seed; not independent real-user holdout"},
+                              "corpus_scope": ("owner-approved local observations, limited to the frozen intake"
+                                               if corpus["corpus_id"] == "librarian-owner-local-v1"
+                                               else "constructed public seed; not independent real-user holdout")},
               "per_query": [], "error": None, "cli_error": None}
     with tempfile.TemporaryDirectory(prefix="librarian-evaluation-") as owned:
         root = Path(owned).resolve()

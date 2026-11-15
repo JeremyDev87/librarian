@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -54,10 +55,31 @@ def run_evaluation(tmp_path, corpus, patch=""):
     return result, json.loads(output.read_text()) if output.is_file() else None
 
 
-def test_real_cli_preserves_misses_and_scores_all_rows(tmp_path, corpus):
+def owner_local(corpus):
+    local = copy.deepcopy(corpus)
+    local.update(corpus_id="librarian-owner-local-v1", source_revision="1" * 64)
+    local["documents"][0]["content"] += "\n합성 점검.\n"
+    local["provenance"] = [
+        {"document_path": doc["path"], "source_path": doc["path"], "section": "whole-document",
+         "source_sha256": hashlib.sha256(doc["content"].encode("utf-8")).hexdigest(),
+         "kind": "owner-provided", "description": "owner-approved local snapshot"}
+        for doc in local["documents"]
+    ]
+    return local
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_real_cli_preserves_misses_and_scores_all_rows(tmp_path, corpus, local):
+    if local:
+        corpus = owner_local(corpus)
     result, report = run_evaluation(tmp_path, corpus)
     assert result.returncode == 0, result.stderr
     assert report["status"] == "complete"
+    assert report["corpus_id"] == corpus["corpus_id"]
+    assert report["measurement"]["corpus_scope"] == (
+        "owner-approved local observations, limited to the frozen intake" if local
+        else "constructed public seed; not independent real-user holdout"
+    )
     rows = report["per_query"]
     assert [row["id"] for row in rows] == ["first", "middle", "negative", "last"]
     assert [row["outcome"] for row in rows] == ["miss", "wrong_candidate", "abstained", "hit"]
@@ -75,6 +97,57 @@ def test_real_cli_preserves_misses_and_scores_all_rows(tmp_path, corpus):
     encoded = json.dumps(report)
     assert "Albatross" not in encoded and "unfindablequasar" not in encoded
     assert str(tmp_path) not in encoded and "/not/the/" not in encoded
+
+
+@pytest.mark.parametrize("local_input,changes", [
+    (False, {"corpus_id": "unknown"}), (False, {"corpus_id": None}),
+    (False, {"corpus_id": []}), (False, {"corpus_id": {}}),
+    (False, {"source_revision": "0" * 64}),
+    (True, {"source_revision": "0" * 40}), (True, {"source_revision": "0" * 63}),
+    (True, {"source_revision": "0" * 65}), (True, {"source_revision": "A" * 64}),
+    (True, {"source_revision": "g" * 64}), (True, {"source_revision": None}),
+])
+def test_invalid_corpus_identity_is_rejected(tmp_path, corpus, local_input, changes):
+    candidate = owner_local(corpus) if local_input else copy.deepcopy(corpus)
+    candidate.update(changes)
+    result, report = run_evaluation(tmp_path, candidate)
+    assert result.returncode == 2 and report is None
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["status"] == "invalid"
+
+
+@pytest.mark.parametrize("changes", [
+    {"kind": "synthetic"}, {"kind": "public-derived"},
+    {"source_path": "current/b.md"}, {"source_path": "CURRENT/a.md"},
+    {"source_path": "../a.md"}, {"document_path": "current/b.md"},
+    {"source_sha256": "0" * 64}, {"source_sha256": "0" * 63},
+    {"source_sha256": "A" * 64}, {"source_sha256": None},
+    {"section": "excerpt"}, {"description": "unapproved"},
+])
+def test_owner_local_invalid_provenance_is_rejected(tmp_path, corpus, changes):
+    local = owner_local(corpus)
+    local["provenance"][0].update(changes)
+    result, report = run_evaluation(tmp_path, local)
+    assert result.returncode == 2 and report is None
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["status"] == "invalid"
+
+
+@pytest.mark.parametrize("damage", ["duplicate", "missing", "changed_bytes", "public_owner_kind"])
+def test_provenance_is_bound_to_corpus_and_document_bytes(tmp_path, corpus, damage):
+    local = owner_local(corpus)
+    if damage == "duplicate":
+        local["provenance"].append(copy.deepcopy(local["provenance"][0]))
+    elif damage == "missing":
+        local["provenance"].pop()
+    elif damage == "changed_bytes":
+        local["documents"][0]["content"] += "\n"
+    else:
+        local.update(corpus_id="librarian-public-seed-v1", source_revision="0" * 40)
+    result, report = run_evaluation(tmp_path, local)
+    assert result.returncode == 2 and report is None
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["status"] == "invalid"
 
 
 @pytest.mark.parametrize("damage", ["empty", "type", "escape", "duplicate", "duplicate_label", "unknown_label", "both_labels", "partial_row", "alias", "provenance", "family_split"])

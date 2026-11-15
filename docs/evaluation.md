@@ -1,6 +1,6 @@
 # Retrieval evaluation
 
-`scripts/evaluate-wiki-retrieval.py` measures the existing authority-aware router on an inline, constructed public corpus. It does not change the search policy or use an existing Wiki or runtime state. A completed measurement can contain misses: completion is not a search-quality approval.
+`scripts/evaluate-wiki-retrieval.py` measures the existing authority-aware router on an inline public or owner-approved local corpus. It does not change the search policy or use an existing Wiki or runtime state. A completed measurement can contain misses: completion is not a search-quality approval.
 
 ## Run from an installed development environment
 
@@ -24,11 +24,11 @@ The evaluator creates its own temporary source and state trees, refreshes once, 
 
 ## Corpus contract and provenance
 
-The UTF-8 JSON input uses `schema_version: 1` and the current `corpus_id: "librarian-public-seed-v1"` contract. Its top-level fields are:
+The UTF-8 JSON input uses `schema_version: 1`. The public seed retains `corpus_id: "librarian-public-seed-v1"`, a 40-character lowercase hexadecimal Git `source_revision`, and `synthetic` or `public-derived` provenance. Its top-level fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `source_revision` | Public repository revision used to prepare the seed. |
+| `source_revision` | Public repository revision, or local source-manifest SHA-256 as described below. |
 | `provenance` | Records containing `document_path`, `source_path`, `section`, `source_sha256`, `kind`, and `description`. |
 | `documents` | Inline Markdown records with `path` and `content`. No external source-file loading is supported. |
 | `queries` | Predeclared questions, labels, splits, and comparison variants. |
@@ -38,6 +38,18 @@ Each query has a unique `id`, a `family`, a `split` (`dev` or `frozen_check`), `
 The checked-in seed contains six documents and eighteen questions covering platform support, snapshots, authority, packaging, out-of-domain questions, and query syntax. Four documents are Korean restatements of public repository material. Two are explicitly synthetic adversarial controls: an unverified raw draft and a document marked `do_not_answer_as_current`. Their metadata is evaluation data, not real user authority. Provenance identifies the supporting public file, revision, section, and checksum; the evaluator checks its schema, not the historical source claims themselves.
 
 Labels and the four polite-question variants were reviewed and frozen before retrieval. `label_basis` records supporting sections or why the corpus cannot answer. Variants are for the separate native comparison; the operational baseline submits only each original `query`. Splitting this small, constructed corpus into `dev` and `frozen_check` does not make it an independent real-user holdout. Changing documents, labels, or variants after seeing results requires a new corpus revision and a new evaluation; old results cannot establish a fair comparison against changed inputs.
+
+### Owner-approved local observations
+
+The same schema also accepts the fixed `corpus_id: "librarian-owner-local-v1"`. Its `source_revision` is a 64-character lowercase hexadecimal SHA-256 of the frozen source manifest. Each document must have exactly one provenance record with `kind: "owner-provided"`, identical relative `source_path` and `document_path`, `section: "whole-document"`, and `description: "owner-approved local snapshot"`. `source_sha256` must equal SHA-256 of the exact inline `content` encoded as UTF-8, including its line endings and final newline. Public and local provenance kinds cannot be mixed.
+
+Before evaluation, the owner must approve the document paths, work scope, observation period, reviewers, and retention. Preserve approved Markdown bytes, paths, frontmatter, and links. Freeze independently reviewed answer/no-answer/forbidden labels before seeing retrieval results; use `frozen_check` and empty `variants` for real observations. Exclude policy-ineligible expected answers without promoting their authority or relabeling them as unanswerable. No submitted materials or independent review means no real-user baseline measurement.
+
+Prepare the source manifest as a list of records containing only `path` and `sha256`, sorted by relative path. Serialize with `json.dumps(entries, sort_keys=True, ensure_ascii=False, separators=(",", ":"))`, append one LF, and encode as UTF-8; hash those bytes for `source_revision`. Approval, independent labels, and matching this manifest to approved originals must be verified separately. The evaluator validates the revision format and inline provenance integrity; these fields do not establish approval or authenticate a manifest.
+
+Keep input, reports, and temporary state in an owner-approved, nonsynchronized local directory with restricted permissions (`0700` directories and `umask 077`). Check that its path components are real directories without symlinks before reading or writing, and use a new report name. Set `TMPDIR` inside that directory and remove `PYTHONHOME`, `PYTHONPATH`, and `PYTHONOPTIMIZE` from the evaluation environment; set `PYTHONDONTWRITEBYTECODE=1`. Use the existing `--corpus` and `--output` options only after installing the development environment. Questions are passed to local subprocess arguments; accept only questions approved for that handling. Reports contain document paths and hashes even though they omit raw question and document text, so keep them within the same approved boundary. Share only separately approved aggregates and nonidentifying status; retain or remove local artifacts according to the owner's decision.
+
+`measurement.corpus_scope` remains `constructed public seed; not independent real-user holdout` for public inputs. For local inputs it is `owner-approved local observations, limited to the frozen intake`. Both use the same router, scorer, CLI checks, and measurements below. The local scope describes only that frozen intake, not general user quality; synthetic format checks are not real observations.
 
 ## Report and measurement scope
 
