@@ -49,15 +49,19 @@ def validate_corpus(data) -> dict:
         raise ValueError("corpus_identity")
     if any(not isinstance(data[key], list) or not data[key] for key in ("documents", "queries", "provenance")):
         raise ValueError("empty_collection")
-    paths, aliases = set(), set()
+    paths, aliases = set(), {}
     for doc in data["documents"]:
         if not isinstance(doc, dict) or set(doc) != {"path", "content"} or not relative_path(doc["path"]) or not doc["path"].endswith(".md") or not isinstance(doc["content"], str) or not doc["content"].strip():
             raise ValueError("inline_document")
-        alias = unicodedata.normalize("NFC", doc["path"]).casefold()
-        if alias in aliases:
-            raise ValueError("duplicate_document")
+        parts = doc["path"].split("/")
+        for count in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:count])
+            is_file = count == len(parts)
+            alias = unicodedata.normalize("NFC", prefix).casefold()
+            if alias in aliases and (aliases[alias] != (prefix, is_file) or is_file):
+                raise ValueError("duplicate_document")
+            aliases[alias] = (prefix, is_file)
         paths.add(doc["path"])
-        aliases.add(alias)
     provenance_paths = set()
     for item in data["provenance"]:
         if not isinstance(item, dict) or set(item) != {"document_path", "source_path", "section", "source_sha256", "kind", "description"} or not all(isinstance(value, str) and value.strip() for value in item.values()):
@@ -222,27 +226,30 @@ def run(corpus: dict) -> dict:
                               "p95_method": "nearest-rank; five-sample observed maximum; not population latency or SLA",
                               "mrr_definition": "existing scorer: reciprocal first relevant rank; correct abstention = 1",
                               "corpus_scope": "constructed public seed; not independent real-user holdout"},
-              "per_query": [], "error": None}
+              "per_query": [], "error": None, "cli_error": None}
     with tempfile.TemporaryDirectory(prefix="librarian-evaluation-") as owned:
         root = Path(owned).resolve()
         try:
             runtime = prepare(corpus, root)
             router, _, pointer = runtime
             report.update(generation=pointer["generation"], current_pointer_sha256=pointer["sha256"], source_before=pointer["source_before"])
-            report["cli_checks"] = check_cli(corpus, runtime)
+            try:
+                report["cli_checks"] = check_cli(corpus, runtime)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                report["cli_error"] = failure(exc)
             report["per_query"] = evaluate(corpus, runtime)
             check_runtime(runtime)
             ineligible = [entry.relative_path for entry in router.authority.entries if entry.tier not in {"current", "authority"} or entry.do_not_answer_as_current]
             report["authority_ineligible_paths"] = sorted(ineligible)
-            if all(row["status"] == "complete" for row in report["per_query"]):
+            if report["cli_error"] is None and all(row["status"] == "complete" for row in report["per_query"]):
                 report.update(status="complete", aggregate=aggregate_rows(report["per_query"], ineligible))
         except Exception as exc:
             report["error"] = failure(exc)
         finally:
             report["source_after"] = inventory(root / "source")
-            report["source_preserved"] = report.get("source_before") == report["source_after"]
+            report["source_preserved"] = report["source_before"] == report["source_after"] if "source_before" in report else None
             report["source_inventory_sha256"] = digest(report["source_after"])
-        if not report["source_preserved"]:
+        if report["source_preserved"] is False:
             report.update(status="invalid", aggregate=None, error={"reason_code": "source_changed"})
         if not report["per_query"]:
             report["per_query"] = [{"id": query["id"], "status": "invalid", "outcome": "execution_error", "diagnostics": None,

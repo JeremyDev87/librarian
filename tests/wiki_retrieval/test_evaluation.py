@@ -171,6 +171,62 @@ ns['prepare'] = prepare
         assert report["per_query"][0]["error"]["reason_code"]
     if fault in {"exception", "nondeterministic"}:
         assert report["per_query"][-1]["status"] == "complete"
+    if fault == "source_changed":
+        assert report["source_preserved"] is False
+        assert report["error"]["reason_code"] == "source_changed"
+    if fault == "cli_failure":
+        assert report["cli_error"]["exception_class"] == "CalledProcessError"
+        assert all(row["status"] == "complete" and len(row["samples"]) == 5 for row in report["per_query"])
+        assert "hidden" not in json.dumps(report)
+
+
+def test_cli_preflight_query_error_does_not_skip_remaining_queries(tmp_path, corpus):
+    corpus["queries"][0]["query"] = "type:unknown"
+    result, report = run_evaluation(tmp_path, corpus)
+    assert result.returncode == 2, result.stderr
+    assert report["status"] == "invalid" and report["aggregate"] is None
+    rows = report["per_query"]
+    assert [row["status"] for row in rows] == ["invalid", "complete", "complete", "complete"]
+    assert report["cli_error"] == rows[0]["error"]
+    assert rows[0]["score"] is None and rows[0]["diagnostics"] is None
+    assert all(len(row["samples"]) == 5 for row in rows[1:])
+    assert "type:unknown" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("paths", [
+    ("current/a.md", "CURRENT/b.md"),
+    ("current/caf\u00e9/a.md", "current/cafe\u0301/b.md"),
+    ("current/a.md", "current/a.md/b.md"),
+    ("current/A.md/b.md", "current/a.md"),
+    ("current/a.md", "CURRENT/A.md"),
+    ("current/caf\u00e9.md", "current/cafe\u0301.md"),
+])
+def test_document_path_aliases_and_file_parent_conflicts_are_rejected(tmp_path, corpus, paths):
+    replacements = dict(zip([doc["path"] for doc in corpus["documents"][:2]], paths))
+    for doc in corpus["documents"]:
+        doc["path"] = replacements.get(doc["path"], doc["path"])
+    for item in corpus["provenance"]:
+        item["document_path"] = replacements.get(item["document_path"], item["document_path"])
+    for query in corpus["queries"]:
+        if "expected_paths" in query:
+            query["expected_paths"] = [replacements.get(path, path) for path in query["expected_paths"]]
+    result, report = run_evaluation(tmp_path, corpus)
+    assert result.returncode == 2, result.stderr
+    assert report is None
+
+
+def test_preparation_oserror_retains_cause_without_source_baseline(tmp_path, corpus):
+    path = "current/" + "a" * 256 + ".md"
+    corpus["documents"][0]["path"] = path
+    corpus["provenance"][0]["document_path"] = path
+    corpus["queries"][-1]["expected_paths"] = [path]
+    result, report = run_evaluation(tmp_path, corpus)
+    assert result.returncode == 2, result.stderr
+    assert report["status"] == "invalid" and report["aggregate"] is None
+    assert report["error"] == {"exception_class": "OSError", "reason_code": "execution_error"}
+    assert report["source_preserved"] is None
+    assert all(row["status"] == "invalid" and row["samples"] == [] for row in report["per_query"])
+    assert path not in json.dumps(report) and str(tmp_path) not in json.dumps(report)
 
 
 def test_forbidden_and_ineligible_candidates_are_counted(tmp_path, corpus):
